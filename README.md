@@ -7,59 +7,50 @@ Direct Bluetooth Mesh control of Amaran studio lights — **no Amaran Desktop ap
 ```bash
 npm install
 
-# Turn all lights on
 npm run mesh:on
-
-# Turn all lights off
 npm run mesh:off
-
-# Set brightness (0-100%)
-npm run mesh:brightness 75
-
-# Set color temperature
-npm run mesh:cct 80 5600
-```
-
-## How It Works
-
-Two implementations, both working without the Amaran Desktop app:
-
-### TypeScript (recommended)
-`src/mesh-controller.ts` implements the full BLE Mesh stack directly:
-- Connects to the Key Light as a Mesh Proxy client
-- Sends proxy filter setup (mirrors what the Telink SDK does internally)
-- Sends commands using the Telink proprietary opcode `0x26` — reverse-engineered
-  from `PyMeshSDK.so` by intercepting `CBPeripheral.writeValue`
-
-### Python (fallback)
-`src/pymesh-controller.py` loads `vendor/PyMeshSDK/PyMeshSDK.so` — the actual
-Telink SigMeshLib the desktop app ships with — via Python 3.11.
-
-```bash
-npm run py:on
-npm run py:off
-npm run py:brightness 75
-npm run py:cct 80 5600
+npm run mesh:brightness 75        # 75%
+npm run mesh:cct 80 5600          # 80%, 5600K
+npm run mesh:cct 80 5600 15       # 80%, 5600K, GM +15 (green)
+npm run mesh:hsi 80 45 60         # 80% brightness, 45° hue, 60% saturation
 ```
 
 ## npm Scripts
 
-| Script | Description |
-|--------|-------------|
-| `mesh:on` | Turn all lights on (TypeScript, direct BLE) |
-| `mesh:off` | Turn all lights off (TypeScript, direct BLE) |
-| `mesh:brightness` | Set brightness 0-100 |
-| `mesh:cct` | Set brightness and colour temp |
-| `py:on` | Turn on via Python SDK |
-| `py:off` | Turn off via Python SDK |
-| `py:brightness` | Set brightness via Python SDK |
-| `py:cct` | Set CCT via Python SDK |
-| `scan` | Scan for nearby BLE devices |
-| `discover <addr>` | Discover services on a device |
+| Script | Args | Description |
+|--------|------|-------------|
+| `mesh:on` | | Turn all lights on |
+| `mesh:off` | | Turn all lights off |
+| `mesh:brightness` | `<0-100>` | Set brightness % |
+| `mesh:cct` | `<brightness> <kelvin> [gm]` | CCT — brightness 0-100, kelvin 2500-7500, optional GM -50 to +50 |
+| `mesh:hsi` | `<brightness> <hue> <saturation>` | HSI color — brightness 0-100, hue 0-360°, saturation 0-100 |
+| `py:on` | | Turn on via Python SDK fallback |
+| `py:off` | | Turn off via Python SDK fallback |
+| `py:brightness` | `<0-100>` | Brightness via Python SDK |
+| `py:cct` | `<brightness> <kelvin>` | CCT via Python SDK |
+| `scan` | | Scan for nearby BLE devices |
+| `discover` | `<addr>` | List services on a device |
 
-## Technical Details
+Individual lights can be targeted by appending `key`, `back`, or `halo`:
+```bash
+npx tsx src/mesh-controller.ts brightness 50 key
+```
 
-### Mesh Network Config (from `amaran.db`)
+## How It Works
+
+`src/mesh-controller.ts` implements a full BLE Mesh stack and connects to the
+Key Light as a Mesh Proxy client. All physical controls use **Telink proprietary
+opcode `0x26`** — reverse-engineered from `vendor/PyMeshSDK/PyMeshSDK.so` by
+intercepting `CBPeripheral.writeValue` while the SDK ran, then decrypting the
+captured BLE Mesh PDU.
+
+Standard BLE Mesh models (Generic OnOff, Light Lightness, CTL) ARE present and
+respond, but they are decoupled from the physical LED output on these lights.
+
+`src/pymesh-controller.py` is a Python fallback that loads the actual
+Telink SigMeshLib from `vendor/PyMeshSDK/PyMeshSDK.so`.
+
+## Mesh Network Config (from `amaran.db`)
 
 Keys extracted from `~/Library/Application Support/amaran Desktop/*/amaran.db`:
 
@@ -71,7 +62,7 @@ Keys extracted from `~/Library/Application Support/amaran Desktop/*/amaran.db`:
 | EncKey | `ce1a0749c640a23be0bdf1c7c95fce93` |
 | PrivKey | `96b5a15d3b3d3fa366251132ba16491c` |
 
-### Lights
+## Lights
 
 | Name | MAC | BLE UUID (macOS) | Mesh Addr |
 |------|-----|-----------------|-----------|
@@ -79,47 +70,22 @@ Keys extracted from `~/Library/Application Support/amaran Desktop/*/amaran.db`:
 | Back Light | A4:C1:38:13:30:86 | `D16927EE-947B-5A0C-ED73-358C29BC4BCD` | 4 |
 | Halo 100x | A4:C1:38:56:8C:EF | `F2D070F8-804F-3221-0C60-D56F36767ACC` | 6 |
 
-### The Telink Proprietary Opcode
+## Command Payload Format (opcode `0x26`)
 
-Standard BLE Mesh models (Generic OnOff, Light Lightness) exist on the lights
-and respond to commands — but they are **decoupled from the physical LED output**.
-Physical on/off (sleep/wake) is controlled by Telink's proprietary opcode `0x26`
-with a 10-byte payload:
+All commands share a 10-byte payload: `[checksum, ...packed_bits..., cmd_value, cmd_type]`
 
-```
-[checksum, 0, 0, 0, 0, 0, 0, 0, cmd_value, cmd_type]
-  checksum = sum(bytes 1-9) & 0xFF
-  cmd_type = 0x8C (sleep/wake) | 0x8F (brightness)
-  cmd_value = 0x01 (on) / 0x00 (off) for sleep/wake
-            = (intensity >> 2) & 0xFF for brightness (intensity 0-1000)
-```
-
-Discovered by swizzling `CBPeripheral.writeValue:forCharacteristic:type:` while
-running the Python SDK and decrypting the captured BLE Mesh PDU.
-
-### Sequence Numbers
-
-Commands start at a random seq in the 12M–16M range (set with `MESH_SEQ` env var
-to override) to avoid replay cache collisions with previous runs.
-
-## Files
-
-```
-src/
-  mesh-controller.ts     Full TypeScript BLE Mesh implementation (primary)
-  pymesh-controller.py   Python SDK wrapper (fallback)
-  ble-scanner.ts         BLE device scanner/discovery
-  ble-controller.ts      Simple BLE controller (template)
-vendor/
-  PyMeshSDK/
-    PyMeshSDK.so         Telink SigMeshLib Python extension (from app bundle)
-```
+| Mode | cmd_type | Encoding |
+|------|----------|----------|
+| On/Off | `0x8C` | byte[8] = 0x01 on / 0x00 off |
+| Brightness | `0x8F` | intensity (0-1000): byte[7] = low2 bits × 64, byte[8] = upper 8 bits |
+| CCT | `0x82` | kelvin → `(k+24)&0x3FF` packed at bits 52-61; GM at bits 43-51; intensity same as brightness |
+| HSI | `0x81` | hue (9 bits) at bits 53-61; saturation (7 bits) at bits 46-52; intensity as above |
 
 See `DIRECT-BLE-CONTROL.md` for the full reverse-engineering research notes.
 
 ## Requirements
 
-- Node.js 18+ with `@abandonware/noble` (handles BLE on macOS)
-- Python 3.11 for the `py:*` scripts: `brew install python@3.11`
+- Node.js 18+ (`npm install`)
+- Python 3.11 for `py:*` scripts: `brew install python@3.11`
 - Amaran Desktop app **closed** (it holds the BLE connection)
 - Bluetooth permission granted to Terminal/iTerm

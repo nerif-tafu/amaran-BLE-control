@@ -11,7 +11,7 @@
  *   npx tsx src/mesh-controller.ts off [light]
  *   npx tsx src/mesh-controller.ts brightness <0-100> [light]
  *   npx tsx src/mesh-controller.ts cct <brightness 0-100> <kelvin 2500-7500> [light]
- *   npx tsx src/mesh-controller.ts hsl <brightness 0-100> <hue 0-360> <saturation 0-100> [light]
+ *   npx tsx src/mesh-controller.ts hsi <brightness 0-100> <hue 0-360> <saturation 0-100> [light]
  *   light = key | back | halo | all (default: all)
  */
 
@@ -51,20 +51,10 @@ const PROXY_DATA_OUT = "2ade"; // notifications come from here
 
 // ─── Mesh Opcodes (stored as little-endian integers — see Opcode.java) ───────
 
+// All physical controls use the Telink proprietary opcode 0x26.
+// Standard BLE Mesh models (Generic OnOff, Light Lightness, CTL) exist on the
+// lights and respond, but they are decoupled from the physical LED output.
 const OP = {
-  ONOFF_GET: 0x0182,        // 0x8201 on wire — acknowledged get (light must respond)
-  ONOFF_SET: 0x0282,        // 0x8202 on wire — acknowledged set (light must respond)
-  ONOFF_SET_NOACK: 0x0382,  // 0x8203 on wire
-  LIGHTNESS_SET: 0x4c82,    // 0x824C on wire — acknowledged set
-  LIGHTNESS_SET_NOACK: 0x4d82, // 0x824D on wire
-  CTL_SET_NOACK: 0x5f82,    // 0x825F on wire
-  HSL_SET_NOACK: 0x7782,    // 0x8277 on wire
-  // Telink proprietary opcode — reverse-engineered from PyMeshSDK.so sendOnOffCommand.
-  // NOT a standard BLE Mesh model. sendOnOffCommand calls sendTelinkDataAppendHeaderWithAddress
-  // which uses opcode 0x26 (1-byte SIG slot) with a 10-byte checksum payload.
-  // Payload format: [checksum, 0×7, cmd_value, cmd_type]
-  //   sleep/wake:  cmd_type=0x8C, cmd_value=0x01(on) or 0x00(off)
-  //   brightness:  cmd_type=0x8F, cmd_value=(intensity>>2)&0xFF  (intensity 0–1000)
   TELINK_CMD: 0x26,
 };
 
@@ -579,12 +569,6 @@ class MeshController {
     return this.seq;
   }
 
-  private tid = 0;
-  private nextTid(): number {
-    this.tid = (this.tid + 1) & 0xff;
-    return this.tid;
-  }
-
   async send(dst: number, opcode: number, params: Buffer, retries = 3): Promise<void> {
     if (!this.dataIn) throw new Error("Not connected");
     for (let i = 0; i < retries; i++) {
@@ -599,13 +583,6 @@ class MeshController {
       await this.dataIn.writeAsync(pdu, true);
       await new Promise(r => setTimeout(r, 80)); // small gap between retries
     }
-  }
-
-  async setOnOff(dst: number, on: boolean): Promise<void> {
-    const val = on ? 0x01 : 0x00;
-    const tid = this.nextTid();
-    // Standard Generic OnOff Set Unacknowledged (NOACK) with optional fields explicit
-    await this.send(dst, OP.ONOFF_SET_NOACK, Buffer.from([val, tid, 0x00, 0x00]));
   }
 
   // Build a 10-byte Telink proprietary command payload (reverse-engineered from PyMeshSDK.so).
@@ -780,7 +757,7 @@ Light targets (optional, default = all):
       case "on":
         for (const addr of targets) {
           const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Turning ${name} ON (OnOff + Lightness + CTL)`);
+          console.log(`Turning ${name} ON`);
           await ctrl.setOnOffBlast(addr, true);
         }
         break;
