@@ -1,6 +1,9 @@
 node_modules/
 dist/
 
+# User-specific light config — generate with: npm run setup
+lights.json
+
 # Telink SDK state (recreated on each run)
 ~/Documents/TelinkSDKMeshJsonData
 

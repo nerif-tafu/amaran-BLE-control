@@ -1,47 +1,22 @@
 /**
- * Amaran BLE Mesh Controller
+ * Amaran BLE Mesh Controller — core library
  *
  * Directly controls Amaran lights via Bluetooth Mesh, bypassing the desktop app.
  * Protocol reverse-engineered from com.sidus.link.amaran APK v1.0.70.
  *
- * Keys extracted from: ~/Library/Application Support/amaran Desktop/<id>/amaran.db
- *
- * Usage:
- *   npx tsx src/mesh-controller.ts on [light]
- *   npx tsx src/mesh-controller.ts off [light]
- *   npx tsx src/mesh-controller.ts brightness <0-100> [light]
- *   npx tsx src/mesh-controller.ts cct <brightness 0-100> <kelvin 2500-7500> [light]
- *   npx tsx src/mesh-controller.ts hsi <brightness 0-100> <hue 0-360> <saturation 0-100> [light]
- *   light = key | back | halo | all (default: all)
+ * Import and use MeshController directly, or run via cli.ts.
  */
 
 import * as crypto from "crypto";
 // @ts-ignore
 import noble from "@abandonware/noble";
-
-// ─── Mesh Network Config (from amaran.db) ────────────────────────────────────
-
-const NET_KEY = Buffer.from("0D8094267D3F4EA5B06B324C8C0AD926", "hex");
-const APP_KEY = Buffer.from("AB1C91DC421149FF87694B05A236F214", "hex");
-
-const LIGHTS: Record<string, { mac: string; uuid: string; address: number; name: string }> = {
-  // mac = real MAC (Linux), uuid = CoreBluetooth UUID (macOS, from ble-scanner output)
-  key: { mac: "a4:c1:38:13:41:38", uuid: "b3ed1263a9304e5132b3edfbb4c71aec", address: 2, name: "Key Light" },
-  back: { mac: "a4:c1:38:13:30:86", uuid: "f2d070f8804f32210c60d56f36767acc", address: 4, name: "Back Light" },
-  halo: { mac: "a4:c1:38:56:8c:ef", uuid: "d16927ee947b5a0ced73358c29bc4bcd", address: 6, name: "Halo 100x" },
-};
-
-// Key Light is the reliable relay hub — the desktop app always connects through it.
-const RELAY_HUB_UUID = LIGHTS.key.uuid;
-
-// Group "All" address from amaran.db groups table (node_address=49152=0xC000)
-const GROUP_ALL = 0xc000;
+import type { Config, LightConfig } from "./config.js";
 
 // Provisioner address (0x0001 is standard for SIG mesh provisioner).
-// PyMeshSDK binary had 'DC2C26000001' suggesting last seq for addr 0x0001
-// was 0x262CDC = 2,502,844 — we start our seq above that.
 const LOCAL_ADDRESS = 0x0001;
 const DEFAULT_TTL = 10;
+// Group "All" address — typical provisioner default, overridden by config if needed.
+const GROUP_ALL = 0xc000;
 
 // ─── BLE UUIDs ───────────────────────────────────────────────────────────────
 
@@ -355,36 +330,43 @@ function parseIVIndexFromProxy(data: Buffer): number | null {
 
 // ─── Controller class ────────────────────────────────────────────────────────
 
-class MeshController {
+export class MeshController {
   private peripheral: any = null;
   private dataIn: any = null;
   private dataOut: any = null;
   private ivIndex = 0;
-  // Random start in 12M–16M range: Python SDK uses ~9M, and previous runs leave cached seqs
-  // on the lights. Being random avoids replay rejection between successive runs.
+  // Random start in 12M–16M range: avoids replay rejection between successive runs.
   private seq = parseInt(process.env.MESH_SEQ ?? '') || (12000000 + Math.floor(Math.random() * 4000000));
 
   private readonly aid: number;
   private readonly nid: number;
   private readonly encKey: Buffer;
   private readonly privKey: Buffer;
+  private readonly appKey: Buffer;
+  private readonly relayHubUUID: string; // actually the relay hub MAC address
+  readonly lights: LightConfig[];
 
-  constructor() {
-    const derived = k2(NET_KEY);
+  constructor(config: Config) {
+    const netKey = Buffer.from(config.netKey, "hex");
+    this.appKey = Buffer.from(config.appKey, "hex");
+    const derived = k2(netKey);
     this.nid = derived.nid;
     this.encKey = derived.encKey;
     this.privKey = derived.privKey;
-    this.aid = k4(APP_KEY);
-
-    console.log(`Mesh keys derived — NID: 0x${this.nid.toString(16).padStart(2, "0")}, AID: 0x${this.aid.toString(16).padStart(2, "0")}`);
+    this.aid = k4(this.appKey);
+    this.relayHubUUID = config.relayHub; // MAC address stored as-is
+    this.lights = config.lights;
   }
 
   async connect(preferredMac?: string): Promise<boolean> {
     const self = this;
     return new Promise((resolve) => {
-      console.log(`Scanning for Amaran lights (preferring relay hub ${RELAY_HUB_UUID})...`);
+      // Normalize relay hub MAC for comparison
+      const hubMac = self.relayHubUUID.toLowerCase().replace(/-/g, ":");
+      const knownMacs = self.lights.map(l => l.mac.toLowerCase().replace(/-/g, ":"));
+      console.log(`Scanning for lights (relay hub MAC: ${hubMac})...`);
       let found = false;
-      const candidates = new Map<string, any>(); // addr → peripheral, ordered by discovery
+      const candidates = new Map<string, any>(); // normalized-addr → peripheral
 
       noble.on("stateChange", async (state: string) => {
         if (state === "poweredOn") await noble.startScanningAsync([], true);
@@ -397,21 +379,18 @@ class MeshController {
         const name = (p.advertisement.localName || "").toLowerCase();
         const advServices: string[] = (p.advertisement.serviceUuids || []).map((u: string) => u.toLowerCase());
         const hasMeshProxy = advServices.some(u => u === "1828" || u.startsWith("00001828"));
-        const knownUUIDs = Object.values(LIGHTS).map(l => l.uuid.toLowerCase());
-        const knownMacs = Object.values(LIGHTS).map(l => l.mac.toLowerCase().replace(/-/g, ":"));
-        const isByUUID = knownUUIDs.includes(addr);
-        const isByMac = knownMacs.includes(addr) || (preferredMac && addr === preferredMac.toLowerCase().replace(/-/g, ":"));
+        const isByMac = knownMacs.includes(addr) || (preferredMac ? addr === preferredMac.toLowerCase().replace(/-/g, ":") : false);
         const isByName = name.includes("slck") || name.includes("amaran") || name.includes("aputure");
 
-        if (!hasMeshProxy && !isByUUID && !isByMac && !isByName) return;
+        if (!hasMeshProxy && !isByMac && !isByName) return;
 
-        const isHub = addr === RELAY_HUB_UUID.toLowerCase();
-        const matchType = hasMeshProxy ? "proxy-svc" : isByUUID ? "uuid" : isByMac ? "mac" : "name";
-        console.log(`  Found: ${p.advertisement.localName || addr} (${addr}) [${matchType}]${isHub ? " ← relay hub" : ""}`);
-
+        const isHub = addr === hubMac;
+        const matchType = hasMeshProxy ? "proxy-svc" : isByMac ? "mac" : "name";
+        if (!candidates.has(addr)) {
+          console.log(`  Found: ${p.advertisement.localName || addr} (${addr}) [${matchType}]${isHub ? " ← relay hub" : ""}`);
+        }
         candidates.set(addr, p);
 
-        // Connect to the relay hub immediately when seen; otherwise wait to accumulate
         if (isHub) {
           found = true;
           noble.stopScanningAsync();
@@ -424,7 +403,7 @@ class MeshController {
         if (found || candidates.size === 0) return;
         found = true;
         await noble.stopScanningAsync();
-        const best = candidates.get(RELAY_HUB_UUID.toLowerCase()) ?? candidates.values().next().value;
+        const best = candidates.get(hubMac) ?? candidates.values().next().value;
         const addr = (best.address || best.id || "").toLowerCase().replace(/-/g, ":");
         doConnect(best, addr).then(resolve);
       }, 5000);
@@ -574,7 +553,7 @@ class MeshController {
     for (let i = 0; i < retries; i++) {
       const seq = this.nextSeq();
       const pdu = buildProxyPDU(
-        APP_KEY, this.aid, this.nid, this.encKey, this.privKey,
+        this.appKey, this.aid, this.nid, this.encKey, this.privKey,
         seq, LOCAL_ADDRESS, dst, this.ivIndex,
         opcode, params
       );
@@ -687,134 +666,3 @@ class MeshController {
   }
 }
 
-// ─── CLI ─────────────────────────────────────────────────────────────────────
-
-async function main() {
-  const args = process.argv.slice(2);
-  const cmd = args[0];
-
-  if (!cmd || cmd === "help") {
-    console.log(`
-Amaran BLE Mesh Controller — direct Bluetooth, no desktop app needed
-
-Usage:
-  npx tsx src/mesh-controller.ts <command> [args] [light]
-
-Commands:
-  on              Turn light on
-  off             Turn light off
-  brightness <n>  Set brightness 0-100
-  cct <b> <k> [gm]  Set brightness (0-100), color temp (2500-7500K), optional GM (-50..+50)
-  hsi <b> <h> <s>   Set brightness (0-100), hue (0-360°), saturation (0-100)
-
-Light targets (optional, default = all):
-  key             Key Light  (A4:C1:38:13:41:38, address 2)
-  back            Back Light (A4:C1:38:13:30:86, address 4)
-  halo            Halo 100x  (A4:C1:38:56:8C:EF, address 6)
-  all             Broadcast to all (default)
-`);
-    return;
-  }
-
-  // Parse light target from last arg
-  const lastArg = args[args.length - 1];
-  const lightKeys = Object.keys(LIGHTS);
-  let targetLight: string | undefined;
-  let dstAddress = GROUP_ALL; // 0xC000 — the configured "All" group in amaran.db
-
-  if (lightKeys.includes(lastArg)) {
-    targetLight = lastArg;
-    dstAddress = LIGHTS[targetLight].address;
-    args.pop();
-  } else if (lastArg === "all") {
-    args.pop();
-  }
-
-  // Connect to the first Amaran light found via Mesh Proxy service scan.
-  // We use the mesh DST address (not BLE connection) to target specific lights,
-  // so it doesn't matter which physical device we connect to for BLE.
-  const ctrl = new MeshController();
-
-  if (!(await ctrl.connect())) process.exit(1);
-
-  // Wait for IV index from Secure Network Beacon (device broadcasts this on connect)
-  await ctrl.waitForBeacon(4000);
-
-  // Proxy filter setup — send but don't block on the response
-  await ctrl.setupProxyFilter();
-
-  try {
-    // Python SDK sends to 0xFFFF (all-nodes broadcast) for all-lights commands.
-    const targets: number[] = targetLight
-      ? [dstAddress]
-      : [0xffff];
-
-    switch (cmd) {
-      case "status": {
-        console.log("status: use npm run py:on / py:off to check light state");
-        break;
-      }
-      case "on":
-        for (const addr of targets) {
-          const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Turning ${name} ON`);
-          await ctrl.setOnOffBlast(addr, true);
-        }
-        break;
-      case "off":
-        for (const addr of targets) {
-          const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Turning ${name} OFF`);
-          await ctrl.setOnOffBlast(addr, false);
-        }
-        break;
-      case "brightness": {
-        const pct = parseInt(args[1], 10);
-        if (isNaN(pct)) { console.error("Usage: brightness <0-100>"); process.exit(1); }
-        for (const addr of targets) {
-          const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Setting ${name} brightness to ${pct}%`);
-          await ctrl.setBrightness(addr, pct);
-        }
-        break;
-      }
-      case "cct": {
-        const b = parseInt(args[1], 10);
-        const k = parseInt(args[2], 10);
-        const gm = args[3] ? parseInt(args[3], 10) : 0;
-        if (isNaN(b) || isNaN(k)) { console.error("Usage: cct <brightness 0-100> <kelvin 2500-7500> [gm -50..50]"); process.exit(1); }
-        for (const addr of targets) {
-          const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Setting ${name} CCT — ${b}% brightness, ${k}K, GM ${gm >= 0 ? "+" : ""}${gm}`);
-          await ctrl.setCCT(addr, b, k, gm);
-        }
-        break;
-      }
-      case "hsi":
-      case "hsl": {
-        const b = parseInt(args[1], 10);
-        const h = parseInt(args[2], 10);
-        const s = parseInt(args[3], 10);
-        if (isNaN(b) || isNaN(h) || isNaN(s)) { console.error("Usage: hsi <brightness 0-100> <hue 0-360> <saturation 0-100>"); process.exit(1); }
-        for (const addr of targets) {
-          const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Setting ${name} HSI — ${b}% brightness, ${h}° hue, ${s}% saturation`);
-          await ctrl.setHSL(addr, b, h, s);
-        }
-        break;
-      }
-      default:
-        console.error(`Unknown command: ${cmd}. Run with 'help' to see usage.`);
-        process.exit(1);
-    }
-
-    await new Promise((r) => setTimeout(r, 2000));
-  } finally {
-    await ctrl.disconnect();
-  }
-}
-
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});

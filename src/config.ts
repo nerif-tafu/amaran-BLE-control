@@ -1,0 +1,57 @@
+import * as fs from "fs";
+import * as path from "path";
+
+export interface LightConfig {
+  key: string;     // short name used as CLI target (e.g. "key", "back", "halo")
+  name: string;    // display name
+  mac: string;     // BLE MAC address (e.g. "A4:C1:38:13:41:38")
+  address: number; // mesh unicast address
+}
+
+export interface Config {
+  netKey: string;        // hex string, 32 chars
+  appKey: string;        // hex string, 32 chars
+  relayHub: string;      // MAC address of the light to connect through as BLE Mesh Proxy
+  lights: LightConfig[];
+}
+
+const CONFIG_PATH = path.join(process.cwd(), "lights.json");
+
+export function loadConfig(): Config {
+  if (!fs.existsSync(CONFIG_PATH)) {
+    throw new Error(
+      "lights.json not found.\n" +
+      "Run setup first:  npm run setup\n" +
+      "Or copy the example: cp lights.example.json lights.json"
+    );
+  }
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")) as Config;
+  } catch (e: any) {
+    throw new Error(`lights.json is invalid: ${e.message}`);
+  }
+}
+
+export function saveConfig(config: Config): void {
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + "\n", "utf-8");
+}
+
+export function configExists(): boolean {
+  return fs.existsSync(CONFIG_PATH);
+}
+
+export function findAmaranDB(): string | null {
+  const base = path.join(
+    process.env.HOME ?? "",
+    "Library", "Application Support", "amaran Desktop"
+  );
+  if (!fs.existsSync(base)) return null;
+  try {
+    const hits = fs.readdirSync(base)
+      .map(d => path.join(base, d, "amaran.db"))
+      .filter(p => fs.existsSync(p));
+    return hits[0] ?? null;
+  } catch {
+    return null;
+  }
+}
