@@ -630,38 +630,47 @@ class MeshController {
     await this.send(dst, OP.TELINK_CMD, params, 3);
   }
 
+  // Telink brightness: reverse-engineered from sendBrightnessCommand in PyMeshSDK.so.
+  // intensity 0–1000 (multiply percent by 10).
+  // Low 2 bits of intensity go to byte[7] bits 6-7; upper bits go to byte[8]; cmd_type=0x8F.
   async setTelinkBrightness(dst: number, intensity: number): Promise<void> {
-    // Brightness uses cmd_type=0x8F, cmd_value=(intensity>>2)&0xFF, intensity 0–1000.
-    const clipped = Math.max(0, Math.min(1000, intensity));
-    const params = this.telinkPayload(0x8F, (clipped >> 2) & 0xff);
-    await this.send(dst, OP.TELINK_CMD, params, 3);
+    const v = Math.max(0, Math.min(1000, intensity));
+    const p = Buffer.alloc(10, 0);
+    p[7] = (v & 3) << 6;
+    p[8] = (v >> 2) & 0xff;
+    p[9] = 0x8f;
+    let sum = 0;
+    for (let i = 1; i < 10; i++) sum += p[i];
+    p[0] = sum & 0xff;
+    await this.send(dst, OP.TELINK_CMD, p, 3);
   }
 
-  // Send Generic OnOff Get (acknowledged) — light MUST send back Generic OnOff Status
-  // if encryption is correct. Watch for "← Network PDU received" in output.
-  async getStatus(dst: number): Promise<void> {
-    await this.send(dst, OP.ONOFF_GET, Buffer.alloc(0), 1);
-    console.log("  Waiting 3s for status response...");
-    await new Promise(r => setTimeout(r, 3000));
+  // Telink CCT: reverse-engineered from sendCCTCommand in PyMeshSDK.so.
+  // kelvin 2500–7500, intensity 0–1000.
+  // Kelvin is packed via (kelvin+24)&0x3FF into bits 52-61 of a 64-bit field.
+  // Bit 38 (byte[4]=0x40) is always set. cmd_type=0x82.
+  async setTelinkCCT(dst: number, kelvin: number, intensity: number): Promise<void> {
+    const v = Math.max(0, Math.min(1000, intensity));
+    const k = Math.max(2500, Math.min(10000, kelvin));
+    const w12 = (k + 24) & 0x3ff;
+    const p = Buffer.alloc(10, 0);
+    p[4] = 0x40;
+    p[6] = (w12 & 0xf) << 4;
+    p[7] = ((w12 >> 4) & 0x3f) | ((v & 3) << 6);
+    p[8] = (v >> 2) & 0xff;
+    p[9] = 0x82;
+    let sum = 0;
+    for (let i = 1; i < 10; i++) sum += p[i];
+    p[0] = sum & 0xff;
+    await this.send(dst, OP.TELINK_CMD, p, 3);
   }
 
   async setBrightness(dst: number, percent: number): Promise<void> {
-    const lightness = Math.round(Math.max(0, Math.min(100, percent)) / 100 * 65535);
-    const p = Buffer.alloc(3);
-    p.writeUInt16LE(lightness, 0);
-    p[2] = this.nextTid();
-    await this.send(dst, OP.LIGHTNESS_SET_NOACK, p);
+    await this.setTelinkBrightness(dst, Math.round(percent * 10));
   }
 
   async setCCT(dst: number, brightnessPercent: number, kelvin: number): Promise<void> {
-    const lightness = Math.round(Math.max(0, Math.min(100, brightnessPercent)) / 100 * 65535);
-    const temp = Math.max(800, Math.min(20000, kelvin));
-    const p = Buffer.alloc(7);
-    p.writeUInt16LE(lightness, 0);
-    p.writeUInt16LE(temp, 2);
-    p.writeInt16LE(0, 4); // deltaUV
-    p[6] = this.nextTid();
-    await this.send(dst, OP.CTL_SET_NOACK, p);
+    await this.setTelinkCCT(dst, kelvin, Math.round(brightnessPercent * 10));
   }
 
   async setHSL(dst: number, brightnessPercent: number, hueDeg: number, satPercent: number): Promise<void> {
@@ -748,11 +757,7 @@ Light targets (optional, default = all):
 
     switch (cmd) {
       case "status": {
-        // Acknowledged GET — light MUST reply with Generic OnOff Status if encryption is correct
-        const addr = targets[0];
-        const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-        console.log(`Querying ${name} status (acknowledged — watch for response)...`);
-        await ctrl.getStatus(addr);
+        console.log("status: use npm run py:on / py:off to check light state");
         break;
       }
       case "on":
