@@ -16,6 +16,7 @@
     "mesh:off": "tsx src/mesh-controller.ts off",
     "mesh:brightness": "tsx src/mesh-controller.ts brightness",
     "mesh:cct": "tsx src/mesh-controller.ts cct",
+    "mesh:hsi": "tsx src/mesh-controller.ts hsi",
     "py:on": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py on",
     "py:off": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py off",
     "py:brightness": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py brightness",

@@ -646,19 +646,44 @@ class MeshController {
   }
 
   // Telink CCT: reverse-engineered from sendCCTCommand in PyMeshSDK.so.
-  // kelvin 2500–7500, intensity 0–1000.
-  // Kelvin is packed via (kelvin+24)&0x3FF into bits 52-61 of a 64-bit field.
-  // Bit 38 (byte[4]=0x40) is always set. cmd_type=0x82.
-  async setTelinkCCT(dst: number, kelvin: number, intensity: number): Promise<void> {
+  // kelvin 2500–7500, intensity 0–1000, gm -50 to +50.
+  // Kelvin packed via (kelvin+24)&0x3FF into bits 52-61. Bit 38 (byte[4]=0x40) always set.
+  // GM magnitude at bits 45-51 (7 bits), GM sign at bit 43. cmd_type=0x82.
+  async setTelinkCCT(dst: number, kelvin: number, intensity: number, gm = 0): Promise<void> {
     const v = Math.max(0, Math.min(1000, intensity));
     const k = Math.max(2500, Math.min(10000, kelvin));
+    const g = Math.max(-50, Math.min(50, gm));
     const w12 = (k + 24) & 0x3ff;
+    // GM encoding: gm_raw = |g| * 10, gm_encoded = gm_raw/10 = |g| via SDK formula.
+    // gm_flag=0 (green) or 1 (magenta) at bit 43.
+    const gm_encoded = Math.abs(g);   // 0-50, 7-bit value at bits 45-51
+    const gm_flag = g < 0 ? 1 : 0;    // sign bit at bit 43
     const p = Buffer.alloc(10, 0);
-    p[4] = 0x40;
-    p[6] = (w12 & 0xf) << 4;
-    p[7] = ((w12 >> 4) & 0x3f) | ((v & 3) << 6);
+    p[4] = 0x40;                                             // bit 38 always set
+    p[5] = ((gm_encoded & 7) << 5) | (gm_flag << 3);        // gm bits0-2 at bits45-47, flag at bit43
+    p[6] = ((w12 & 0xf) << 4) | ((gm_encoded >> 3) & 0xf);  // cct bits0-3 at bits52-55, gm bits3-6 at bits48-51
+    p[7] = ((w12 >> 4) & 0x3f) | ((v & 3) << 6);            // cct bits4-9 at bits56-61, intensity low2 at bits62-63
     p[8] = (v >> 2) & 0xff;
     p[9] = 0x82;
+    let sum = 0;
+    for (let i = 1; i < 10; i++) sum += p[i];
+    p[0] = sum & 0xff;
+    await this.send(dst, OP.TELINK_CMD, p, 3);
+  }
+
+  // Telink HSI: reverse-engineered from sendHSICommand in PyMeshSDK.so.
+  // hue 0-360, saturation 0-100, intensity 0-100%. cmd_type=0x81.
+  // Hue packed as 9 bits at bits 53-61, saturation 7 bits at bits 46-52.
+  async setTelinkHSI(dst: number, hue: number, saturation: number, intensity: number): Promise<void> {
+    const v = Math.max(0, Math.min(1000, Math.round(intensity * 10)));
+    const h = Math.max(0, Math.min(360, hue)) & 0x1ff;  // 9 bits
+    const s = Math.max(0, Math.min(100, saturation)) & 0x7f;  // 7 bits
+    const p = Buffer.alloc(10, 0);
+    p[5] = (s & 3) << 6;                           // sat bits0-1 at bits46-47
+    p[6] = ((h & 7) << 5) | ((s >> 2) & 0x1f);    // hue bits0-2 at bits53-55, sat bits2-6 at bits48-52
+    p[7] = ((h >> 3) & 0x3f) | ((v & 3) << 6);    // hue bits3-8 at bits56-61, intensity low2 at bits62-63
+    p[8] = (v >> 2) & 0xff;
+    p[9] = 0x81;
     let sum = 0;
     for (let i = 1; i < 10; i++) sum += p[i];
     p[0] = sum & 0xff;
@@ -669,20 +694,12 @@ class MeshController {
     await this.setTelinkBrightness(dst, Math.round(percent * 10));
   }
 
-  async setCCT(dst: number, brightnessPercent: number, kelvin: number): Promise<void> {
-    await this.setTelinkCCT(dst, kelvin, Math.round(brightnessPercent * 10));
+  async setCCT(dst: number, brightnessPercent: number, kelvin: number, gm = 0): Promise<void> {
+    await this.setTelinkCCT(dst, kelvin, Math.round(brightnessPercent * 10), gm);
   }
 
   async setHSL(dst: number, brightnessPercent: number, hueDeg: number, satPercent: number): Promise<void> {
-    const lightness = Math.round(Math.max(0, Math.min(100, brightnessPercent)) / 100 * 65535);
-    const hue = Math.round(((hueDeg % 360) / 360) * 65535);
-    const sat = Math.round(Math.max(0, Math.min(100, satPercent)) / 100 * 65535);
-    const p = Buffer.alloc(7);
-    p.writeUInt16LE(lightness, 0);
-    p.writeUInt16LE(hue, 2);
-    p.writeUInt16LE(sat, 4);
-    p[6] = this.nextTid();
-    await this.send(dst, OP.HSL_SET_NOACK, p);
+    await this.setTelinkHSI(dst, hueDeg, satPercent, brightnessPercent);
   }
 
   async disconnect(): Promise<void> {
@@ -710,8 +727,8 @@ Commands:
   on              Turn light on
   off             Turn light off
   brightness <n>  Set brightness 0-100
-  cct <b> <k>     Set brightness (0-100) and colour temp (2500-7500K)
-  hsl <b> <h> <s> Set brightness, hue (0-360°), saturation (0-100)
+  cct <b> <k> [gm]  Set brightness (0-100), color temp (2500-7500K), optional GM (-50..+50)
+  hsi <b> <h> <s>   Set brightness (0-100), hue (0-360°), saturation (0-100)
 
 Light targets (optional, default = all):
   key             Key Light  (A4:C1:38:13:41:38, address 2)
@@ -787,22 +804,24 @@ Light targets (optional, default = all):
       case "cct": {
         const b = parseInt(args[1], 10);
         const k = parseInt(args[2], 10);
-        if (isNaN(b) || isNaN(k)) { console.error("Usage: cct <brightness 0-100> <kelvin 2500-7500>"); process.exit(1); }
+        const gm = args[3] ? parseInt(args[3], 10) : 0;
+        if (isNaN(b) || isNaN(k)) { console.error("Usage: cct <brightness 0-100> <kelvin 2500-7500> [gm -50..50]"); process.exit(1); }
         for (const addr of targets) {
           const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Setting ${name} CCT — ${b}% brightness, ${k}K`);
-          await ctrl.setCCT(addr, b, k);
+          console.log(`Setting ${name} CCT — ${b}% brightness, ${k}K, GM ${gm >= 0 ? "+" : ""}${gm}`);
+          await ctrl.setCCT(addr, b, k, gm);
         }
         break;
       }
+      case "hsi":
       case "hsl": {
         const b = parseInt(args[1], 10);
         const h = parseInt(args[2], 10);
         const s = parseInt(args[3], 10);
-        if (isNaN(b) || isNaN(h) || isNaN(s)) { console.error("Usage: hsl <brightness 0-100> <hue 0-360> <saturation 0-100>"); process.exit(1); }
+        if (isNaN(b) || isNaN(h) || isNaN(s)) { console.error("Usage: hsi <brightness 0-100> <hue 0-360> <saturation 0-100>"); process.exit(1); }
         for (const addr of targets) {
           const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Setting ${name} HSL — ${b}% brightness, ${h}° hue, ${s}% saturation`);
+          console.log(`Setting ${name} HSI — ${b}% brightness, ${h}° hue, ${s}% saturation`);
           await ctrl.setHSL(addr, b, h, s);
         }
         break;
