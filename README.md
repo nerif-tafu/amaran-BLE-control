@@ -1,110 +1,125 @@
 # Amaran Light Controller
 
-Control your Amaran 150c light from the command line or scripts.
+Direct Bluetooth Mesh control of Amaran studio lights — **no Amaran Desktop app required**.
 
 ## Quick Start
 
 ```bash
-# Install dependencies
 npm install
 
-# Turn light on
-npx tsx src/amaran-control.ts on
+# Turn all lights on
+npm run mesh:on
 
-# Turn light off  
-npx tsx src/amaran-control.ts off
+# Turn all lights off
+npm run mesh:off
 
-# Set brightness to 75%
-npx tsx src/amaran-control.ts brightness 75
+# Set brightness (0-100%)
+npm run mesh:brightness 75
 
-# Set color temperature to 5600K
-npx tsx src/amaran-control.ts cct 5600
+# Set color temperature
+npm run mesh:cct 80 5600
 ```
 
 ## How It Works
 
-The Amaran Desktop app exposes a WebSocket server on `ws://127.0.0.1:33782` that accepts JSON-RPC commands. This controller:
+Two implementations, both working without the Amaran Desktop app:
 
-1. Automatically starts the Amaran Desktop app if not running
-2. Connects to the WebSocket server
-3. Sends commands to control the light
+### TypeScript (recommended)
+`src/mesh-controller.ts` implements the full BLE Mesh stack directly:
+- Connects to the Key Light as a Mesh Proxy client
+- Sends proxy filter setup (mirrors what the Telink SDK does internally)
+- Sends commands using the Telink proprietary opcode `0x26` — reverse-engineered
+  from `PyMeshSDK.so` by intercepting `CBPeripheral.writeValue`
 
-## Commands
+### Python (fallback)
+`src/pymesh-controller.py` loads `vendor/PyMeshSDK/PyMeshSDK.so` — the actual
+Telink SigMeshLib the desktop app ships with — via Python 3.11.
 
-| Command | Description |
-|---------|-------------|
-| `on` | Turn light on (wake from sleep) |
-| `off` | Turn light off (sleep mode) |
-| `toggle` | Toggle on/off |
-| `brightness <0-100>` | Set brightness percentage |
-| `cct <2500-7500>` | Set color temperature in Kelvin |
-| `status` | Show current light status |
-
-## Integration Examples
-
-### Shell Script
 ```bash
-#!/bin/bash
-# Toggle light for video calls
-cd ~/Sites/amaran-light
-npx tsx src/amaran-control.ts toggle
+npm run py:on
+npm run py:off
+npm run py:brightness 75
+npm run py:cct 80 5600
 ```
 
-### Stream Deck
-Create a button that runs:
-```bash
-cd ~/Sites/amaran-light && npx tsx src/amaran-control.ts toggle
-```
+## npm Scripts
 
-### Home Assistant (via shell_command)
-```yaml
-shell_command:
-  amaran_on: "cd ~/Sites/amaran-light && npx tsx src/amaran-control.ts on"
-  amaran_off: "cd ~/Sites/amaran-light && npx tsx src/amaran-control.ts off"
-```
+| Script | Description |
+|--------|-------------|
+| `mesh:on` | Turn all lights on (TypeScript, direct BLE) |
+| `mesh:off` | Turn all lights off (TypeScript, direct BLE) |
+| `mesh:brightness` | Set brightness 0-100 |
+| `mesh:cct` | Set brightness and colour temp |
+| `py:on` | Turn on via Python SDK |
+| `py:off` | Turn off via Python SDK |
+| `py:brightness` | Set brightness via Python SDK |
+| `py:cct` | Set CCT via Python SDK |
+| `scan` | Scan for nearby BLE devices |
+| `discover <addr>` | Discover services on a device |
 
 ## Technical Details
 
-### Bluetooth Mesh
-The Amaran 150c uses **Bluetooth Mesh** (Telink SDK), not simple BLE. This requires:
-- Network provisioning
-- Encryption keys (NetKey, AppKey)
-- IV Index tracking
-- Proper mesh message formatting
+### Mesh Network Config (from `amaran.db`)
 
-The mesh network configuration is stored in:
+Keys extracted from `~/Library/Application Support/amaran Desktop/*/amaran.db`:
+
+| | Value |
+|--|--|
+| Net Key | `0D8094267D3F4EA5B06B324C8C0AD926` |
+| App Key | `AB1C91DC421149FF87694B05A236F214` |
+| NID | `0x3B` |
+| EncKey | `ce1a0749c640a23be0bdf1c7c95fce93` |
+| PrivKey | `96b5a15d3b3d3fa366251132ba16491c` |
+
+### Lights
+
+| Name | MAC | BLE UUID (macOS) | Mesh Addr |
+|------|-----|-----------------|-----------|
+| Key Light | A4:C1:38:13:41:38 | `B3ED1263-A930-4E51-32B3-EDFBB4C71AEC` | 2 |
+| Back Light | A4:C1:38:13:30:86 | `D16927EE-947B-5A0C-ED73-358C29BC4BCD` | 4 |
+| Halo 100x | A4:C1:38:56:8C:EF | `F2D070F8-804F-3221-0C60-D56F36767ACC` | 6 |
+
+### The Telink Proprietary Opcode
+
+Standard BLE Mesh models (Generic OnOff, Light Lightness) exist on the lights
+and respond to commands — but they are **decoupled from the physical LED output**.
+Physical on/off (sleep/wake) is controlled by Telink's proprietary opcode `0x26`
+with a 10-byte payload:
+
 ```
-~/Library/Application Support/amaran Desktop/*/amaran.db
+[checksum, 0, 0, 0, 0, 0, 0, 0, cmd_value, cmd_type]
+  checksum = sum(bytes 1-9) & 0xFF
+  cmd_type = 0x8C (sleep/wake) | 0x8F (brightness)
+  cmd_value = 0x01 (on) / 0x00 (off) for sleep/wake
+            = (intensity >> 2) & 0xFF for brightness (intensity 0-1000)
 ```
 
-### Mesh Keys Found
-- **Network Key**: `0D8094267D3F4EA5B06B324C8C0AD926`
-- **App Key**: `AB1C91DC421149FF87694B05A236F214`
-- **Node Address**: `2`
+Discovered by swizzling `CBPeripheral.writeValue:forCharacteristic:type:` while
+running the Python SDK and decrypting the captured BLE Mesh PDU.
 
-### Standard Mesh Opcodes Used
-- Generic OnOff Set: `0x8202`
-- Light Lightness Set: `0x824C`
-- Light CTL Set: `0x825E`
+### Sequence Numbers
 
-### Why WebSocket Instead of Direct BLE?
-Bluetooth Mesh encryption is complex. The PyMeshSDK in the app handles:
-- AES-CCM encryption/decryption
-- IV Index management
-- Sequence number tracking
-- Transport layer segmentation
-
-Reimplementing this would require a full Bluetooth Mesh stack.
+Commands start at a random seq in the 12M–16M range (set with `MESH_SEQ` env var
+to override) to avoid replay cache collisions with previous runs.
 
 ## Files
 
-- `src/amaran-control.ts` - Main controller (WebSocket-based)
-- `src/mesh-controller.ts` - Experimental direct BLE mesh control
-- `src/websocket-controller.ts` - Lower-level WebSocket controller
-- `src/ble-scanner.ts` - BLE device scanner/discovery
+```
+src/
+  mesh-controller.ts     Full TypeScript BLE Mesh implementation (primary)
+  pymesh-controller.py   Python SDK wrapper (fallback)
+  ble-scanner.ts         BLE device scanner/discovery
+  ble-controller.ts      Simple BLE controller (template)
+vendor/
+  PyMeshSDK/
+    PyMeshSDK.so         Telink SigMeshLib Python extension (from app bundle)
+```
+
+See `DIRECT-BLE-CONTROL.md` for the full reverse-engineering research notes.
 
 ## Requirements
 
-- Node.js 18+
-- Amaran Desktop app installed
-- macOS (for BLE support)
+- Node.js 18+ with `@abandonware/noble` (handles BLE on macOS)
+- Python 3.11 for the `py:*` scripts: `brew install python@3.11`
+- Amaran Desktop app **closed** (it holds the BLE connection)
+- Bluetooth permission granted to Terminal/iTerm

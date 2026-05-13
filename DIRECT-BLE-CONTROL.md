@@ -1,7 +1,8 @@
 # Amaran Light Direct BLE Control — Research Findings
 
 > **Status: WORKING** — No desktop app required.  
-> Solution: `src/pymesh-controller.py`
+> Primary solution: `src/mesh-controller.ts` (pure TypeScript)  
+> Fallback: `src/pymesh-controller.py` (Python SDK wrapper)
 
 ---
 
@@ -193,18 +194,38 @@ From `~/Library/Application Support/amaran Desktop/*/amaran.db`:
 
 ```
 src/
-  pymesh-controller.py   ← The working solution
-  mesh-controller.ts     ← Noble-based attempt (doesn't work, preserved for reference)
-  websocket-controller.ts ← Original WebSocket approach (works but needs app)
+  mesh-controller.ts     ← Primary solution (pure TypeScript, no Python required)
+  pymesh-controller.py   ← Fallback solution (Python + PyMeshSDK.so)
+vendor/
+  PyMeshSDK/PyMeshSDK.so ← Telink SigMeshLib Python extension (copied from app)
 ```
+
+### Telink Proprietary Opcode (discovered May 2026)
+
+After completing the full BLE Mesh crypto stack in TypeScript and confirming
+all standard models (Generic OnOff, Light Lightness) respond correctly,
+it was discovered that physical LED output is controlled by a **Telink
+proprietary opcode `0x26`** — not any standard BLE Mesh model.
+
+Discovered by: swizzling `CBPeripheral.writeValue:forCharacteristic:type:`
+while running the Python SDK, then decrypting the intercepted packet.
+
+Payload format: `[checksum, 0×7, cmd_value, cmd_type]`
+- Wake (on): `[0x8D, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x8C]`
+- Sleep (off): `[0x8C, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x8C]`
 
 ---
 
 ## Running Requirements
 
-- Homebrew Python 3.11: `/opt/homebrew/bin/python3.11`
-- Amaran Desktop app installed (provides the SDK `.so` file)
+### TypeScript (mesh-controller.ts)
+- Node.js 18+ with `npm install`
 - Amaran Desktop app **not running** (would hold the BLE connection)
 - macOS with Bluetooth permission granted to Terminal/iTerm
+
+### Python (pymesh-controller.py)
+- Homebrew Python 3.11: `/opt/homebrew/bin/python3.11`
+- `vendor/PyMeshSDK/PyMeshSDK.so` (copied from the app bundle)
+- Amaran Desktop app **not running**
 
 The script automatically deletes `~/Documents/TelinkSDKMeshJsonData` before each run to force fresh initialization from the hard-coded mesh configuration.

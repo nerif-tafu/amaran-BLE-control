@@ -1,7 +1,7 @@
 {
   "name": "amaran-light",
   "version": "0.0.1",
-  "description": "Control Amaran 150c light via Bluetooth or WebSocket",
+  "description": "Control Amaran 150c light via Bluetooth",
   "main": "dist/index.js",
   "bin": {
     "amaran": "./dist/index.js"
@@ -10,11 +10,6 @@
     "start": "tsx src/index.ts",
     "scan": "tsx src/ble-scanner.ts scan",
     "discover": "tsx src/ble-scanner.ts connect",
-    "list": "tsx src/websocket-controller.ts list",
-    "on": "tsx src/websocket-controller.ts on",
-    "off": "tsx src/websocket-controller.ts off",
-    "toggle": "tsx src/websocket-controller.ts toggle",
-    "status": "tsx src/websocket-controller.ts status",
     "ble:on": "tsx src/ble-controller.ts on",
     "ble:off": "tsx src/ble-controller.ts off",
     "mesh:on": "tsx src/mesh-controller.ts on",
@@ -32,12 +27,10 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@abandonware/noble": "^1.9.2-26",
-    "ws": "^8.19.0"
+    "@abandonware/noble": "^1.9.2-26"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
-    "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

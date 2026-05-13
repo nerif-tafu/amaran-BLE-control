@@ -2,16 +2,11 @@
 /**
  * Amaran Light Controller
  *
- * Control your Amaran 150c light from the command line.
+ * Control your Amaran 150c light via Direct Bluetooth (BLE).
  *
  * Usage:
  *   amaran scan              - Scan for Bluetooth devices
  *   amaran discover <addr>   - Discover services on a BLE device
- *   amaran list              - List connected lights (via WebSocket)
- *   amaran on [device]       - Turn light on
- *   amaran off [device]      - Turn light off
- *   amaran toggle [device]   - Toggle light
- *   amaran status [device]   - Get light status
  */
 
 const args = process.argv.slice(2);
@@ -23,18 +18,7 @@ function showHelp() {
 ║                     AMARAN LIGHT CONTROLLER                           ║
 ╚═══════════════════════════════════════════════════════════════════════╝
 
-Control your Amaran 150c light from the command line.
-
-METHODS:
-  This tool supports two methods of control:
-
-  1. WebSocket (via Amaran Desktop app)
-     Requires the Amaran Desktop app to be running.
-     Commands: list, on, off, toggle, status, brightness, cct
-
-  2. Direct Bluetooth (BLE)
-     Bypasses the app entirely (experimental).
-     First, use 'scan' and 'discover' to find UUIDs.
+Control your Amaran 150c light via Direct Bluetooth (BLE).
 
 COMMANDS:
 
@@ -42,23 +26,19 @@ COMMANDS:
     scan              Scan for nearby Bluetooth devices
     discover <addr>   Connect to a device and list its services
 
-  WebSocket Control (requires Amaran Desktop app):
-    list              List all connected lights
-    on [device]       Turn light on
-    off [device]      Turn light off
-    toggle [device]   Toggle light on/off
-    status [device]   Get light status
-    brightness <n>    Set brightness (0-100)
-    cct <kelvin>      Set color temperature (2000-10000K)
+  Direct BLE Control:
+    npm run ble:on
+    npm run ble:off
+    npm run mesh:on
+    npm run mesh:off
+    npm run mesh:brightness
+    npm run mesh:cct
+    npm run py:on
+    npm run py:off
 
 EXAMPLES:
   npx tsx src/index.ts scan
   npx tsx src/index.ts discover aa:bb:cc:dd:ee:ff
-  npx tsx src/index.ts list
-  npx tsx src/index.ts on
-  npx tsx src/index.ts off "Key Light"
-  npx tsx src/index.ts brightness 75
-  npx tsx src/index.ts cct 5600
 
 SETUP FOR DIRECT BLUETOOTH:
   1. Run: npx tsx src/index.ts scan
@@ -66,7 +46,7 @@ SETUP FOR DIRECT BLUETOOTH:
   3. Run: npx tsx src/index.ts discover <address>
   4. Note the Service and Characteristic UUIDs
   5. Update ble-controller.ts with the UUIDs
-  6. Run: npx tsx src/ble-controller.ts on
+  6. Run: npm run ble:on
 `);
 }
 
@@ -76,7 +56,6 @@ async function main() {
     return;
   }
 
-  // BLE commands
   if (command === "scan") {
     const duration = args[1] || "10000";
     const { spawn } = await import("child_process");
@@ -102,13 +81,9 @@ async function main() {
     return;
   }
 
-  // WebSocket commands - delegate to websocket-controller
-  const wsArgs = ["tsx", "src/websocket-controller.ts", ...args];
-  const { spawn } = await import("child_process");
-  spawn("npx", wsArgs, {
-    stdio: "inherit",
-    cwd: process.cwd(),
-  });
+  console.error(`Unknown command: ${command}`);
+  showHelp();
+  process.exit(1);
 }
 
 main().catch(console.error);

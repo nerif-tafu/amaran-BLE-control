@@ -55,9 +55,17 @@ const OP = {
   ONOFF_GET: 0x0182,        // 0x8201 on wire — acknowledged get (light must respond)
   ONOFF_SET: 0x0282,        // 0x8202 on wire — acknowledged set (light must respond)
   ONOFF_SET_NOACK: 0x0382,  // 0x8203 on wire
+  LIGHTNESS_SET: 0x4c82,    // 0x824C on wire — acknowledged set
   LIGHTNESS_SET_NOACK: 0x4d82, // 0x824D on wire
   CTL_SET_NOACK: 0x5f82,    // 0x825F on wire
   HSL_SET_NOACK: 0x7782,    // 0x8277 on wire
+  // Telink proprietary opcode — reverse-engineered from PyMeshSDK.so sendOnOffCommand.
+  // NOT a standard BLE Mesh model. sendOnOffCommand calls sendTelinkDataAppendHeaderWithAddress
+  // which uses opcode 0x26 (1-byte SIG slot) with a 10-byte checksum payload.
+  // Payload format: [checksum, 0×7, cmd_value, cmd_type]
+  //   sleep/wake:  cmd_type=0x8C, cmd_value=0x01(on) or 0x00(off)
+  //   brightness:  cmd_type=0x8F, cmd_value=(intensity>>2)&0xFF  (intensity 0–1000)
+  TELINK_CMD: 0x26,
 };
 
 // ─── Proxy PDU types ─────────────────────────────────────────────────────────
@@ -65,6 +73,12 @@ const OP = {
 const PROXY_TYPE_NETWORK = 0x00;
 const PROXY_TYPE_BEACON = 0x01;
 const PROXY_TYPE_PROXY_CONFIG = 0x02;
+
+// ─── Proxy configuration opcodes (BLE Mesh spec §6.5) ────────────────────────
+
+const PROXY_CFG_SET_FILTER_TYPE = 0x00;
+const PROXY_CFG_ADD_ADDRESSES   = 0x01;
+const PROXY_FILTER_WHITELIST    = 0x00;
 
 // ─── Crypto helpers ──────────────────────────────────────────────────────────
 
@@ -201,6 +215,26 @@ function netNonce(ctl: number, ttl: number, seq: number, src: number, ivIndex: n
   ]);
 }
 
+// Proxy nonce (13 bytes) — BLE Mesh spec §3.8.5.4
+// Same layout as network nonce but type=0x03, byte 1 is always 0x00 (no CTL/TTL).
+function proxyNonce(seq: number, src: number, ivIndex: number): Buffer {
+  return Buffer.from([
+    0x03, // proxy nonce type
+    0x00,
+    (seq >> 16) & 0xff,
+    (seq >> 8) & 0xff,
+    seq & 0xff,
+    (src >> 8) & 0xff,
+    src & 0xff,
+    0x00,
+    0x00,
+    (ivIndex >> 24) & 0xff,
+    (ivIndex >> 16) & 0xff,
+    (ivIndex >> 8) & 0xff,
+    ivIndex & 0xff,
+  ]);
+}
+
 // Build the full proxy PDU for a mesh access message
 // Returns the bytes to write to PROXY_DATA_IN
 function buildProxyPDU(
@@ -259,6 +293,49 @@ function buildProxyPDU(
   return Buffer.concat([Buffer.from([PROXY_TYPE_NETWORK]), networkPDU]);
 }
 
+// Proxy Configuration PDU (BLE Mesh spec §6.5) — sent BEFORE any mesh commands.
+// The Telink SDK always sends Set Filter Type → waits for Filter Status → then Add Addresses
+// before marking the connection ready. Without this handshake the proxy silently drops relayed PDUs.
+// CTL=1, TTL=0, DST=0x0000, encrypted with EncKey + proxy nonce (type 0x03).
+function buildProxyConfigPDU(
+  nid: number,
+  encKey: Buffer,
+  privKey: Buffer,
+  seq: number,
+  src: number,
+  ivIndex: number,
+  opcode: number,
+  params: Buffer
+): Buffer {
+  const ctl = 1;
+  const ttl = 0;
+  const dst = 0x0000;
+
+  // Lower transport PDU: [SEG=0 | Opcode(7)] + params
+  const transportPDU = Buffer.concat([Buffer.from([opcode & 0x7f]), params]);
+
+  // Encrypt [DST | transportPDU] with proxy nonce, 4-byte MIC
+  const netPayload = Buffer.concat([Buffer.from([(dst >> 8) & 0xff, dst & 0xff]), transportPDU]);
+  const encrypted = aesCcmEncrypt(encKey, proxyNonce(seq, src, ivIndex), netPayload, 4);
+
+  // Obfuscate header
+  const ivi = ivIndex & 1;
+  const pecb = computePECB(privKey, ivIndex, encrypted.subarray(0, 7));
+  const hdr = Buffer.from([
+    (ctl << 7) | (ttl & 0x7f),
+    (seq >> 16) & 0xff,
+    (seq >> 8) & 0xff,
+    seq & 0xff,
+    (src >> 8) & 0xff,
+    src & 0xff,
+  ]);
+  const obfuscated = Buffer.alloc(6);
+  for (let i = 0; i < 6; i++) obfuscated[i] = hdr[i] ^ pecb[i];
+
+  const networkPDU = Buffer.concat([Buffer.from([(ivi << 7) | (nid & 0x7f)]), obfuscated, encrypted]);
+  return Buffer.concat([Buffer.from([PROXY_TYPE_PROXY_CONFIG]), networkPDU]);
+}
+
 // PECB for header obfuscation — NetworkLayerPDU.java createPECB()
 function computePECB(privKey: Buffer, ivIndex: number, privacyRandom7: Buffer): Buffer {
   const input = Buffer.alloc(16, 0);
@@ -293,9 +370,9 @@ class MeshController {
   private dataIn: any = null;
   private dataOut: any = null;
   private ivIndex = 0;
-  // After a power-cycle the replay cache is empty — start from 1.
-  // If this is a hot restart (no power cycle), use a high value above the cached range.
-  private seq = parseInt(process.env.MESH_SEQ ?? '1');
+  // Random start in 12M–16M range: Python SDK uses ~9M, and previous runs leave cached seqs
+  // on the lights. Being random avoids replay rejection between successive runs.
+  private seq = parseInt(process.env.MESH_SEQ ?? '') || (12000000 + Math.floor(Math.random() * 4000000));
 
   private readonly aid: number;
   private readonly nid: number;
@@ -405,10 +482,22 @@ class MeshController {
 
   private ivResolve: ((iv: number) => void) | null = null;
   private beaconReceived = false;
+  private filterStatusResolve: (() => void) | null = null;
 
   private onNotify(data: Buffer): void {
     const type = data[0] & 0x3f;
     console.log(`  ← notify [${data.length}b] type=0x${type.toString(16)} raw=${data.toString("hex")}`);
+
+    if (type === PROXY_TYPE_PROXY_CONFIG) {
+      // Proxy Configuration response — Filter Status (opcode 0x03) from the proxy node.
+      // This confirms the proxy is ready to relay mesh messages from us.
+      console.log(`  ← Proxy Filter Status received — proxy ready`);
+      if (this.filterStatusResolve) {
+        this.filterStatusResolve();
+        this.filterStatusResolve = null;
+      }
+      return;
+    }
 
     const iv = parseIVIndexFromProxy(data);
     if (iv !== null) {
@@ -419,9 +508,8 @@ class MeshController {
         this.ivResolve(iv);
         this.ivResolve = null;
       }
-    } else if (type === 0x00) {
-      // Network PDU coming back — light may be responding to our command
-      console.log(`  ← Network PDU received (possible response from light)`);
+    } else if (type === PROXY_TYPE_NETWORK) {
+      console.log(`  ← Network PDU [${data.length}b]`);
     }
   }
 
@@ -435,6 +523,55 @@ class MeshController {
       }, timeoutMs);
       this.ivResolve = (iv) => { clearTimeout(timer); resolve(iv); };
     });
+  }
+
+  // Mirrors what the Telink SDK does in normalConnectPeripheral after subscribing to notifications:
+  // 500ms delay → Set Filter Type (whitelist) → wait for Filter Status → Add Addresses.
+  // Write With Response (withoutResponse=false) avoids CoreBluetooth's silent flow-control drop
+  // that can silently discard Write Without Response commands.
+  async setupProxyFilter(): Promise<void> {
+    if (!this.dataIn) throw new Error("Not connected");
+
+    // Match the Telink SDK's 500ms pause between notification subscribe and filter setup.
+    await new Promise(r => setTimeout(r, 500));
+
+    // 1. Set Filter Type = whitelist (0x00) — use Write With Response so the write is ACK'd
+    const setFilterPDU = buildProxyConfigPDU(
+      this.nid, this.encKey, this.privKey,
+      this.nextSeq(), LOCAL_ADDRESS, this.ivIndex,
+      PROXY_CFG_SET_FILTER_TYPE,
+      Buffer.from([PROXY_FILTER_WHITELIST])
+    );
+    console.log(`  → Proxy: Set Filter Type = Whitelist  ${setFilterPDU.toString("hex")}`);
+    await this.dataIn.writeAsync(setFilterPDU, true);
+
+    // 2. Wait for Filter Status response (up to 2s)
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.filterStatusResolve = null;
+        console.log("  No Filter Status response; proceeding anyway");
+        resolve();
+      }, 2000);
+      this.filterStatusResolve = () => { clearTimeout(timer); resolve(); };
+    });
+
+    // 3. Add our provisioner address + broadcast to the whitelist so we receive status responses.
+    const addrBuf = Buffer.alloc(6);
+    addrBuf.writeUInt16BE(LOCAL_ADDRESS, 0);  // 0x0001
+    addrBuf.writeUInt16BE(0xffff, 2);         // all-nodes broadcast
+    addrBuf.writeUInt16BE(GROUP_ALL, 4);      // 0xC000
+    const addAddrPDU = buildProxyConfigPDU(
+      this.nid, this.encKey, this.privKey,
+      this.nextSeq(), LOCAL_ADDRESS, this.ivIndex,
+      PROXY_CFG_ADD_ADDRESSES,
+      addrBuf
+    );
+    console.log(`  → Proxy: Add Addresses [0x0001, 0xFFFF, 0xC000]  ${addAddrPDU.toString("hex")}`);
+    await this.dataIn.writeAsync(addAddrPDU, true);
+
+    // Small settling gap before commands
+    await new Promise(r => setTimeout(r, 300));
+    console.log("Proxy filter configured — ready to send commands");
   }
 
   private nextSeq(): number {
@@ -465,7 +602,39 @@ class MeshController {
   }
 
   async setOnOff(dst: number, on: boolean): Promise<void> {
-    await this.send(dst, OP.ONOFF_SET_NOACK, Buffer.from([on ? 0x01 : 0x00, this.nextTid()]));
+    const val = on ? 0x01 : 0x00;
+    const tid = this.nextTid();
+    // Standard Generic OnOff Set Unacknowledged (NOACK) with optional fields explicit
+    await this.send(dst, OP.ONOFF_SET_NOACK, Buffer.from([val, tid, 0x00, 0x00]));
+  }
+
+  // Build a 10-byte Telink proprietary command payload (reverse-engineered from PyMeshSDK.so).
+  // Format: [checksum, 0×7_zeros_or_low_bits, cmd_value_low, cmd_type]
+  // checksum = sum(bytes[1..9]) & 0xFF, stored at byte[0].
+  private telinkPayload(cmdType: number, cmdValue: number): Buffer {
+    const p = Buffer.alloc(10);
+    p[8] = cmdValue & 0xff;
+    p[9] = cmdType & 0xff;
+    // Bytes 0-7 encode extra bits for high-precision values — zero for typical sleep/brightness
+    let sum = 0;
+    for (let i = 1; i < 10; i++) sum += p[i];
+    p[0] = sum & 0xff;
+    return p;
+  }
+
+  async setOnOffBlast(dst: number, on: boolean): Promise<void> {
+    // Use Telink proprietary opcode 0x26 with sleep/wake payload (cmd_type=0x8C).
+    // Verified by intercepting CBPeripheral.writeValue from PyMeshSDK.so:
+    //   sendOnOffCommand(0xFFFF, True)  →  opcode=0x26, params=[0x8D,0,0,0,0,0,0,0,0x01,0x8C]
+    const params = this.telinkPayload(0x8C, on ? 0x01 : 0x00);
+    await this.send(dst, OP.TELINK_CMD, params, 3);
+  }
+
+  async setTelinkBrightness(dst: number, intensity: number): Promise<void> {
+    // Brightness uses cmd_type=0x8F, cmd_value=(intensity>>2)&0xFF, intensity 0–1000.
+    const clipped = Math.max(0, Math.min(1000, intensity));
+    const params = this.telinkPayload(0x8F, (clipped >> 2) & 0xff);
+    await this.send(dst, OP.TELINK_CMD, params, 3);
   }
 
   // Send Generic OnOff Get (acknowledged) — light MUST send back Generic OnOff Status
@@ -568,15 +737,14 @@ Light targets (optional, default = all):
   // Wait for IV index from Secure Network Beacon (device broadcasts this on connect)
   await ctrl.waitForBeacon(4000);
 
-  // Small delay to ensure connection is stable
-  await new Promise((r) => setTimeout(r, 500));
+  // Proxy filter setup — send but don't block on the response
+  await ctrl.setupProxyFilter();
 
   try {
-    // For "all lights" (no specific target), send unicast to each light individually —
-    // the app does this too (logs show "change select node address=2/4/6" per command).
+    // Python SDK sends to 0xFFFF (all-nodes broadcast) for all-lights commands.
     const targets: number[] = targetLight
       ? [dstAddress]
-      : Object.values(LIGHTS).map(l => l.address);
+      : [0xffff];
 
     switch (cmd) {
       case "status": {
@@ -590,15 +758,15 @@ Light targets (optional, default = all):
       case "on":
         for (const addr of targets) {
           const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
-          console.log(`Turning ${name} ON`);
-          await ctrl.setOnOff(addr, true);
+          console.log(`Turning ${name} ON (OnOff + Lightness + CTL)`);
+          await ctrl.setOnOffBlast(addr, true);
         }
         break;
       case "off":
         for (const addr of targets) {
           const name = Object.values(LIGHTS).find(l => l.address === addr)?.name ?? `0x${addr.toString(16)}`;
           console.log(`Turning ${name} OFF`);
-          await ctrl.setOnOff(addr, false);
+          await ctrl.setOnOffBlast(addr, false);
         }
         break;
       case "brightness": {
@@ -639,8 +807,7 @@ Light targets (optional, default = all):
         process.exit(1);
     }
 
-    // Wait for all writes to flush before disconnecting
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 2000));
   } finally {
     await ctrl.disconnect();
   }
