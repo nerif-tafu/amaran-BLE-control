@@ -1,0 +1,11 @@
+node_modules/
+dist/
+
+# Telink SDK state (recreated on each run)
+~/Documents/TelinkSDKMeshJsonData
+
+# The bundled SDK binary is committed intentionally so the project works
+# without the Amaran Desktop app installed.
+# If you want to exclude it: uncomment the next line
+# vendor/PyMeshSDK/PyMeshSDK.so
+*.xapk

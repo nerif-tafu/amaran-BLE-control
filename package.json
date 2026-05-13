@@ -1,0 +1,44 @@
+{
+  "name": "amaran-light",
+  "version": "0.0.1",
+  "description": "Control Amaran 150c light via Bluetooth or WebSocket",
+  "main": "dist/index.js",
+  "bin": {
+    "amaran": "./dist/index.js"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "scan": "tsx src/ble-scanner.ts scan",
+    "discover": "tsx src/ble-scanner.ts connect",
+    "list": "tsx src/websocket-controller.ts list",
+    "on": "tsx src/websocket-controller.ts on",
+    "off": "tsx src/websocket-controller.ts off",
+    "toggle": "tsx src/websocket-controller.ts toggle",
+    "status": "tsx src/websocket-controller.ts status",
+    "ble:on": "tsx src/ble-controller.ts on",
+    "ble:off": "tsx src/ble-controller.ts off",
+    "mesh:on": "tsx src/mesh-controller.ts on",
+    "mesh:off": "tsx src/mesh-controller.ts off",
+    "mesh:brightness": "tsx src/mesh-controller.ts brightness",
+    "mesh:cct": "tsx src/mesh-controller.ts cct",
+    "py:on": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py on",
+    "py:off": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py off",
+    "py:brightness": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py brightness",
+    "py:cct": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py cct",
+    "build": "tsc"
+  },
+  "keywords": ["amaran", "aputure", "bluetooth", "ble", "light", "control"],
+  "author": "Wes Bos (https://wesbos.com/)",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-26",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}
