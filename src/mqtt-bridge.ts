@@ -115,6 +115,8 @@ async function run() {
   const client: MqttClient = mqttConnect(mqttCfg.broker, {
     username: mqttCfg.username,
     password: mqttCfg.password,
+    reconnectPeriod: 5000,   // retry every 5s (not the default instant loop)
+    connectTimeout: 10000,
     will: {
       topic: `${topicPrefix}/status`,
       payload: "offline",
@@ -208,15 +210,37 @@ async function run() {
     }
   });
 
-  client.on("error", err => console.error("MQTT error:", err.message));
+  let connected = false;
+  client.on("connect", () => { connected = true; });
+
+  client.on("error", (err: any) => {
+    const msg = err.message || err.code || String(err);
+    console.error("MQTT error:", msg);
+    if (!connected && (err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" || err.code === "ETIMEDOUT")) {
+      console.error(`\nCould not reach MQTT broker at ${mqttCfg.broker}`);
+      console.error("Is the broker running? Configure it in lights.json under \"mqtt\": { \"broker\": \"...\" }");
+      client.end(true);
+      process.exit(1);
+    }
+  });
+
   client.on("disconnect", () => console.log("MQTT disconnected"));
 
-  process.on("SIGINT", () => {
-    client.publish(`${topicPrefix}/status`, "offline", { retain: true }, () => {
-      client.end();
-      process.exit(0);
-    });
-  });
+  const exit = (code = 0) => {
+    try {
+      client.publish(`${topicPrefix}/status`, "offline", { retain: true, qos: 1 }, () => {
+        client.end(true);
+        process.exit(code);
+      });
+      // Force exit after 2s if publish hangs (e.g. broker already down)
+      setTimeout(() => { client.end(true); process.exit(code); }, 2000);
+    } catch {
+      process.exit(code);
+    }
+  };
+
+  process.on("SIGINT",  () => exit(0));
+  process.on("SIGTERM", () => exit(0));
 }
 
 run().catch(err => {
