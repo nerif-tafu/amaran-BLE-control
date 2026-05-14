@@ -12,7 +12,7 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import { SOCKET_PATH, PID_PATH } from "./daemon-paths.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, type LightConfig } from "./config.js";
 import { MeshController } from "./mesh-controller.js";
 
 export { SOCKET_PATH, PID_PATH } from "./daemon-paths.js";
@@ -35,6 +35,108 @@ async function runDaemon() {
   if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);
   fs.writeFileSync(PID_PATH, String(process.pid));
 
+  // ── Optional MQTT state publisher ────────────────────────────────────────────
+  // Publishes state to HA whenever any command runs (CLI, HTTP, or MQTT bridge).
+  // State is only published after the first real command — no guessing initial state.
+  let mqttPublish: ((lightKey: string, state: object) => void) | null = null;
+  let mqttShutdown: (() => void) | null = null;
+
+  if (config.mqtt) {
+    const mqttCfg = config.mqtt;
+    const discoveryPrefix = mqttCfg.discoveryPrefix ?? "homeassistant";
+    const topicPrefix     = mqttCfg.topicPrefix     ?? "amaran";
+
+    // Dynamically import so mqtt is only loaded when actually configured
+    const { connect: mqttConnect } = await import("mqtt");
+    const mqttClient = mqttConnect(mqttCfg.broker, {
+      username: mqttCfg.username,
+      password: mqttCfg.password,
+      reconnectPeriod: 5000,
+      connectTimeout: 10000,
+      will: { topic: `${topicPrefix}/status`, payload: "offline", retain: true, qos: 1 },
+    });
+
+    mqttClient.on("connect", () => {
+      console.log("MQTT connected — publishing discovery");
+      mqttClient.publish(`${topicPrefix}/status`, "online", { retain: true });
+
+      for (const light of ctrl.lights) {
+        const kelvinToMireds = (k: number) => Math.round(1000000 / k);
+        const discovery = {
+          name: light.name,
+          unique_id: `amaran_${light.key}`,
+          schema: "json",
+          command_topic: `${topicPrefix}/${light.key}/set`,
+          state_topic:   `${topicPrefix}/${light.key}/state`,
+          availability_topic: `${topicPrefix}/status`,
+          brightness: true,
+          brightness_scale: 255,
+          color_temp: true,
+          min_mireds: kelvinToMireds(7500),
+          max_mireds: kelvinToMireds(2500),
+          hs: true,
+          device: {
+            identifiers: [`amaran_${light.key}`],
+            name: light.name,
+            model: "Amaran Light",
+            manufacturer: "Aputure",
+          },
+        };
+        mqttClient.publish(
+          `${discoveryPrefix}/light/amaran_${light.key}/config`,
+          JSON.stringify(discovery),
+          { retain: true }
+        );
+      }
+    });
+
+    mqttClient.on("error", (err: any) => {
+      console.warn("MQTT:", err.code ?? err.message);
+    });
+
+    mqttPublish = (lightKey: string, state: object) => {
+      if (mqttClient.connected) {
+        mqttClient.publish(`${topicPrefix}/${lightKey}/state`, JSON.stringify(state), { retain: true });
+      }
+    };
+
+    mqttShutdown = () => {
+      mqttClient.publish(`${topicPrefix}/status`, "offline", { retain: true, qos: 1 }, () => {
+        mqttClient.end(true);
+      });
+      setTimeout(() => mqttClient.end(true), 2000);
+    };
+  }
+
+  // Per-light state tracker (updated after each command, published to MQTT)
+  const lightStates = new Map<string, {
+    state: "ON" | "OFF";
+    brightness: number;        // HA scale 0-255
+    color_mode: "color_temp" | "hs";
+    color_temp?: number;       // mireds
+    hs_color?: [number, number];
+  }>();
+
+  function publishStateFor(lightKey: string) {
+    const s = lightStates.get(lightKey);
+    if (s && mqttPublish) mqttPublish(lightKey, s);
+  }
+
+  function publishStateForAll() {
+    for (const light of ctrl.lights) publishStateFor(light.key);
+  }
+
+  function updateState(addr: number, patch: object) {
+    const lights = addr === 0xffff ? ctrl.lights : ctrl.lights.filter(l => l.address === addr);
+    for (const light of lights) {
+      const prev = lightStates.get(light.key) ?? {
+        state: "ON" as const, brightness: 255, color_mode: "color_temp" as const, color_temp: 178
+      };
+      lightStates.set(light.key, { ...prev, ...patch });
+      publishStateFor(light.key);
+    }
+  }
+
   // ── Helper: resolve light address from key or "all" ─────────────────────────
   function resolveTargets(lightKey?: string): number[] {
     if (!lightKey || lightKey === "all") return [0xffff];
@@ -51,20 +153,26 @@ async function runDaemon() {
     for (const addr of targets) {
       const lightName = ctrl.lights.find(l => l.address === addr)?.name ?? (addr === 0xffff ? "all" : `0x${addr.toString(16)}`);
 
+      const haB = (pct: number) => Math.round((Math.max(0, Math.min(100, pct)) / 100) * 255);
+      const kToM = (k: number) => Math.round(1000000 / k);
+
       switch (cmd) {
         case "on":
           console.log(`Turning ${lightName} ON`);
           await ctrl.setOnOffBlast(addr, true);
+          updateState(addr, { state: "ON" });
           break;
         case "off":
           console.log(`Turning ${lightName} OFF`);
           await ctrl.setOnOffBlast(addr, false);
+          updateState(addr, { state: "OFF" });
           break;
         case "brightness": {
           const pct = parseFloat(args[0]);
           if (isNaN(pct)) throw new Error("brightness requires a number 0-100");
           console.log(`${lightName} brightness → ${pct}%`);
           await ctrl.setBrightness(addr, pct);
+          updateState(addr, { state: "ON", brightness: haB(pct) });
           break;
         }
         case "cct": {
@@ -74,6 +182,7 @@ async function runDaemon() {
           if (isNaN(b) || isNaN(k)) throw new Error("cct requires brightness and kelvin");
           console.log(`${lightName} CCT → ${b}%, ${k}K, GM ${gm}`);
           await ctrl.setCCT(addr, b, k, gm);
+          updateState(addr, { state: "ON", brightness: haB(b), color_mode: "color_temp", color_temp: kToM(k), hs_color: undefined });
           break;
         }
         case "hsi":
@@ -84,6 +193,7 @@ async function runDaemon() {
           if (isNaN(b) || isNaN(h) || isNaN(s)) throw new Error("hsi requires brightness, hue, saturation");
           console.log(`${lightName} HSI → ${b}%, hue ${h}°, sat ${s}%`);
           await ctrl.setHSL(addr, b, h, s);
+          updateState(addr, { state: "ON", brightness: haB(b), color_mode: "hs", hs_color: [h, s], color_temp: undefined });
           break;
         }
         case "ping":
@@ -214,6 +324,7 @@ async function runDaemon() {
   }
 
   const shutdown = async () => {
+    mqttShutdown?.();
     httpServer.close();
     await ctrl.disconnect();
     cleanup();

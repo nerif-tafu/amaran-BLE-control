@@ -1,31 +1,29 @@
 #!/usr/bin/env npx tsx
 /**
- * Amaran MQTT Bridge — Home Assistant integration
+ * Amaran MQTT Bridge — Home Assistant command router
  *
- * Connects to an MQTT broker and publishes HA MQTT Discovery messages so
- * each light appears automatically as a native light entity in Home Assistant.
+ * Subscribes to HA MQTT command topics and forwards them to the daemon.
+ * State publishing and HA discovery are handled by the daemon itself,
+ * so state stays in sync regardless of how commands arrive (CLI, HTTP, MQTT).
  *
- * Requires the daemon to be running (sends commands via Unix socket).
+ * Requires the daemon to be running first.
  *
- * Usage:
- *   npm run mqtt:start
+ * Usage:  npm run mqtt:start
  *
  * Configure in lights.json:
  *   "mqtt": {
  *     "broker": "mqtt://localhost:1883",
  *     "username": "user",
- *     "password": "pass",
- *     "discoveryPrefix": "homeassistant",
- *     "topicPrefix": "amaran"
+ *     "password": "pass"
  *   }
  */
 
 import * as net from "net";
 import { connect as mqttConnect, type MqttClient } from "mqtt";
-import { loadConfig, type LightConfig, type MqttConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 import { SOCKET_PATH } from "./daemon-paths.js";
 
-// ── Daemon socket client ──────────────────────────────────────────────────────
+// ── Daemon socket ─────────────────────────────────────────────────────────────
 
 function sendToDaemon(req: object): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -46,117 +44,68 @@ function sendToDaemon(req: object): Promise<any> {
   });
 }
 
-// ── HA MQTT helpers ───────────────────────────────────────────────────────────
+// ── HA format helpers ─────────────────────────────────────────────────────────
 
-// HA brightness: 0-255. Our brightness: 0-100%.
 const haToPercent = (v: number) => Math.round((v / 255) * 100);
-const percentToHa = (v: number) => Math.round((v / 100) * 255);
-
-// HA color_temp: mireds (1000000/K). Our kelvin: 2500-7500.
-// HA range: ~153 mireds (6500K) to ~370 mireds (2700K)
-const kelvinToMireds = (k: number) => Math.round(1000000 / k);
 const miredsToKelvin = (m: number) => Math.round(1000000 / m);
 
-function makeDiscoveryPayload(light: LightConfig, topicPrefix: string) {
-  const key = light.key;
-  return {
-    name: light.name,
-    unique_id: `amaran_${key}`,
-    schema: "json",
-    command_topic: `${topicPrefix}/${key}/set`,
-    state_topic: `${topicPrefix}/${key}/state`,
-    availability_topic: `${topicPrefix}/status`,
-    brightness: true,
-    brightness_scale: 255,
-    color_temp: true,
-    min_mireds: kelvinToMireds(7500),  // ~133 mireds
-    max_mireds: kelvinToMireds(2500),  // ~400 mireds
-    hs: true,                           // enable HSI color picking
-    device: {
-      identifiers: [`amaran_${key}`],
-      name: light.name,
-      model: "Amaran Light",
-      manufacturer: "Aputure",
-    },
-  };
-}
+// Translate a HA light command JSON into daemon request(s)
+async function handleHACommand(lightKey: string, cmd: any) {
+  if (cmd.state !== undefined) {
+    const on = String(cmd.state).toUpperCase() === "ON";
+    await sendToDaemon({ cmd: on ? "on" : "off", args: [], light: lightKey });
+    if (!on) return; // don't apply other params when turning off
+  }
 
-// ── Light state tracking ──────────────────────────────────────────────────────
+  if (cmd.color_temp !== undefined) {
+    const brightness = cmd.brightness !== undefined ? haToPercent(cmd.brightness) : 80;
+    const kelvin = miredsToKelvin(cmd.color_temp);
+    await sendToDaemon({ cmd: "cct", args: [String(brightness), String(kelvin), "0"], light: lightKey });
+    return;
+  }
 
-interface LightState {
-  state: "ON" | "OFF";
-  brightness: number;      // 0-255 (HA scale)
-  color_temp?: number;     // mireds
-  color_mode?: "color_temp" | "hs";
-  hs_color?: [number, number]; // [hue 0-360, saturation 0-100]
-}
+  if (cmd.hs_color !== undefined) {
+    const [hue, saturation] = cmd.hs_color;
+    const brightness = cmd.brightness !== undefined ? haToPercent(cmd.brightness) : 80;
+    await sendToDaemon({ cmd: "hsi", args: [String(brightness), String(hue), String(saturation)], light: lightKey });
+    return;
+  }
 
-// Default state per light
-function defaultState(): LightState {
-  return { state: "OFF", brightness: 255, color_temp: kelvinToMireds(5600), color_mode: "color_temp" };
+  if (cmd.brightness !== undefined) {
+    await sendToDaemon({ cmd: "brightness", args: [String(haToPercent(cmd.brightness))], light: lightKey });
+  }
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function run() {
   const config = loadConfig();
-  const mqttCfg: MqttConfig = config.mqtt ?? { broker: "mqtt://localhost:1883" };
-  const discoveryPrefix = mqttCfg.discoveryPrefix ?? "homeassistant";
+  const mqttCfg = config.mqtt ?? { broker: "mqtt://localhost:1883" };
   const topicPrefix = mqttCfg.topicPrefix ?? "amaran";
 
-  console.log(`MQTT bridge → ${mqttCfg.broker}`);
-  console.log(`Discovery prefix: ${discoveryPrefix}  |  Topic prefix: ${topicPrefix}`);
-
-  // Track state per light key
-  const states = new Map<string, LightState>(
-    config.lights.map(l => [l.key, defaultState()])
-  );
+  console.log(`MQTT command router → ${mqttCfg.broker}`);
+  console.log(`(Discovery and state publishing are handled by the daemon)`);
 
   const client: MqttClient = mqttConnect(mqttCfg.broker, {
     username: mqttCfg.username,
     password: mqttCfg.password,
-    reconnectPeriod: 5000,   // retry every 5s (not the default instant loop)
+    reconnectPeriod: 5000,
     connectTimeout: 10000,
-    will: {
-      topic: `${topicPrefix}/status`,
-      payload: "offline",
-      retain: true,
-      qos: 1,
-    },
   });
 
+  let connected = false;
+
   client.on("connect", () => {
+    connected = true;
     console.log("MQTT connected");
-
-    // Mark online
-    client.publish(`${topicPrefix}/status`, "online", { retain: true });
-
-    // Publish HA discovery for each light
-    for (const light of config.lights) {
-      const topic = `${discoveryPrefix}/light/amaran_${light.key}/config`;
-      const payload = makeDiscoveryPayload(light, topicPrefix);
-      client.publish(topic, JSON.stringify(payload), { retain: true });
-      console.log(`  Registered: ${light.name} (${light.key})`);
-
-      // Publish initial state
-      const state = states.get(light.key)!;
-      client.publish(`${topicPrefix}/${light.key}/state`, JSON.stringify(state), { retain: true });
-    }
-
-    // Subscribe to command topics
     client.subscribe(`${topicPrefix}/+/set`);
     console.log(`Subscribed to ${topicPrefix}/+/set`);
   });
 
   client.on("message", async (topic, message) => {
-    // Match: amaran/<key>/set
     const match = topic.match(new RegExp(`^${topicPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/([^/]+)/set$`));
     if (!match) return;
     const lightKey = match[1];
-    if (!config.lights.find(l => l.key === lightKey)) {
-      console.warn(`Unknown light key in MQTT: ${lightKey}`);
-      return;
-    }
 
     let cmd: any;
     try { cmd = JSON.parse(message.toString()); } catch {
@@ -164,54 +113,13 @@ async function run() {
       return;
     }
 
-    const state = states.get(lightKey) ?? defaultState();
-    console.log(`MQTT → ${lightKey}:`, cmd);
-
+    console.log(`HA → ${lightKey}:`, cmd);
     try {
-      // Handle state (on/off)
-      if (cmd.state !== undefined) {
-        const on = cmd.state === "ON";
-        await sendToDaemon({ cmd: on ? "on" : "off", args: [], light: lightKey });
-        state.state = on ? "ON" : "OFF";
-      }
-
-      // Handle brightness
-      if (cmd.brightness !== undefined && state.state === "ON") {
-        const pct = haToPercent(cmd.brightness);
-        await sendToDaemon({ cmd: "brightness", args: [String(pct)], light: lightKey });
-        state.brightness = cmd.brightness;
-      }
-
-      // Handle color_temp (CCT mode)
-      if (cmd.color_temp !== undefined) {
-        const kelvin = miredsToKelvin(cmd.color_temp);
-        const pct = haToPercent(state.brightness);
-        await sendToDaemon({ cmd: "cct", args: [String(pct), String(kelvin), "0"], light: lightKey });
-        state.color_temp = cmd.color_temp;
-        state.color_mode = "color_temp";
-        delete state.hs_color;
-      }
-
-      // Handle HS color (HSI mode)
-      if (cmd.hs_color !== undefined) {
-        const [hue, saturation] = cmd.hs_color;
-        const pct = haToPercent(state.brightness);
-        await sendToDaemon({ cmd: "hsi", args: [String(pct), String(hue), String(saturation)], light: lightKey });
-        state.hs_color = [hue, saturation];
-        state.color_mode = "hs";
-        delete state.color_temp;
-      }
-
-      // Publish updated state back
-      states.set(lightKey, state);
-      client.publish(`${topicPrefix}/${lightKey}/state`, JSON.stringify(state), { retain: true });
+      await handleHACommand(lightKey, cmd);
     } catch (e: any) {
-      console.error(`Command failed for ${lightKey}:`, e.message);
+      console.error(`Failed for ${lightKey}:`, e.message);
     }
   });
-
-  let connected = false;
-  client.on("connect", () => { connected = true; });
 
   client.on("error", (err: any) => {
     const msg = err.message || err.code || String(err);
@@ -228,15 +136,9 @@ async function run() {
 
   const exit = (code = 0) => {
     try {
-      client.publish(`${topicPrefix}/status`, "offline", { retain: true, qos: 1 }, () => {
-        client.end(true);
-        process.exit(code);
-      });
-      // Force exit after 2s if publish hangs (e.g. broker already down)
-      setTimeout(() => { client.end(true); process.exit(code); }, 2000);
-    } catch {
-      process.exit(code);
-    }
+      client.end(true, {}, () => process.exit(code));
+      setTimeout(() => process.exit(code), 2000);
+    } catch { process.exit(code); }
   };
 
   process.on("SIGINT",  () => exit(0));
