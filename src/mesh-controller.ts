@@ -398,12 +398,26 @@ export class MeshController {
         }
       });
 
-      // After 5s, pick best candidate (hub > first found)
+      // After 5s, pick best candidate.
+      // Order: matches hubMac (only works if hub config is a BLE UUID on macOS,
+      // since noble exposes BLE UUIDs not MACs on darwin) > known-good proxies
+      // (Key Light, Back Light) > anything else. Halo's proxy implementation
+      // hangs on Set Filter Type writes — avoid it as proxy host.
+      const preferredHubUUIDs = [
+        "b3ed1263a9304e5132b3edfbb4c71aec", // Key Light
+        "d16927ee947b5a0ced73358c29bc4bcd", // Back Light
+      ];
       const hubWait = setTimeout(async () => {
         if (found || candidates.size === 0) return;
         found = true;
         await noble.stopScanningAsync();
-        const best = candidates.get(hubMac) ?? candidates.values().next().value;
+        let best = candidates.get(hubMac);
+        if (!best) {
+          for (const uuid of preferredHubUUIDs) {
+            if (candidates.has(uuid)) { best = candidates.get(uuid); break; }
+          }
+        }
+        if (!best) best = candidates.values().next().value;
         const addr = (best.address || best.id || "").toLowerCase().replace(/-/g, ":");
         doConnect(best, addr).then(resolve);
       }, 5000);
@@ -455,12 +469,8 @@ export class MeshController {
 
   private onNotify(data: Buffer): void {
     const type = data[0] & 0x3f;
-    console.log(`  ← notify [${data.length}b] type=0x${type.toString(16)} raw=${data.toString("hex")}`);
 
     if (type === PROXY_TYPE_PROXY_CONFIG) {
-      // Proxy Configuration response — Filter Status (opcode 0x03) from the proxy node.
-      // This confirms the proxy is ready to relay mesh messages from us.
-      console.log(`  ← Proxy Filter Status received — proxy ready`);
       if (this.filterStatusResolve) {
         this.filterStatusResolve();
         this.filterStatusResolve = null;
@@ -477,8 +487,6 @@ export class MeshController {
         this.ivResolve(iv);
         this.ivResolve = null;
       }
-    } else if (type === PROXY_TYPE_NETWORK) {
-      console.log(`  ← Network PDU [${data.length}b]`);
     }
   }
 
@@ -494,17 +502,25 @@ export class MeshController {
     });
   }
 
+  // Wraps a writeAsync with a hard timeout: on macOS+noble, writeWithoutResponse
+  // sometimes never resolves its confirmation callback even though the bytes
+  // were delivered. We treat slow writes as "fire and forget" after a few seconds.
+  private async writeWithTimeout(char: any, data: Buffer, withoutResponse: boolean, ms = 3000): Promise<"ok" | "timeout"> {
+    const writeP = char.writeAsync(data, withoutResponse).then(() => "ok" as const);
+    const timeoutP = new Promise<"timeout">(r => setTimeout(() => r("timeout"), ms));
+    return Promise.race([writeP, timeoutP]);
+  }
+
   // Mirrors what the Telink SDK does in normalConnectPeripheral after subscribing to notifications:
   // 500ms delay → Set Filter Type (whitelist) → wait for Filter Status → Add Addresses.
-  // Write With Response (withoutResponse=false) avoids CoreBluetooth's silent flow-control drop
-  // that can silently discard Write Without Response commands.
   async setupProxyFilter(): Promise<void> {
     if (!this.dataIn) throw new Error("Not connected");
 
     // Match the Telink SDK's 500ms pause between notification subscribe and filter setup.
     await new Promise(r => setTimeout(r, 500));
 
-    // 1. Set Filter Type = whitelist (0x00) — use Write With Response so the write is ACK'd
+    // 1. Set Filter Type = whitelist (0x00). The Telink proxy rejects blacklist
+    //    silently and stops responding, so whitelist it is.
     const setFilterPDU = buildProxyConfigPDU(
       this.nid, this.encKey, this.privKey,
       this.nextSeq(), LOCAL_ADDRESS, this.ivIndex,
@@ -512,35 +528,39 @@ export class MeshController {
       Buffer.from([PROXY_FILTER_WHITELIST])
     );
     console.log(`  → Proxy: Set Filter Type = Whitelist  ${setFilterPDU.toString("hex")}`);
-    await this.dataIn.writeAsync(setFilterPDU, true);
+    await this.writeWithTimeout(this.dataIn, setFilterPDU, true);
 
     // 2. Wait for Filter Status response (up to 2s)
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         this.filterStatusResolve = null;
-        console.log("  No Filter Status response; proceeding anyway");
         resolve();
       }, 2000);
       this.filterStatusResolve = () => { clearTimeout(timer); resolve(); };
     });
 
-    // 3. Add our provisioner address + broadcast to the whitelist so we receive status responses.
-    const addrBuf = Buffer.alloc(6);
-    addrBuf.writeUInt16BE(LOCAL_ADDRESS, 0);  // 0x0001
-    addrBuf.writeUInt16BE(0xffff, 2);         // all-nodes broadcast
-    addrBuf.writeUInt16BE(GROUP_ALL, 4);      // 0xC000
+    // 3. Whitelist: us, broadcast, group-all, AND every light address from config.
+    //    Adding light addresses means the proxy will forward traffic addressed
+    //    to those lights — including commands sent by other proxy clients
+    //    (e.g. the Desktop app) that get relayed through our hub.
+    const addresses: number[] = [LOCAL_ADDRESS, 0xffff, GROUP_ALL];
+    for (const l of this.lights) {
+      if (typeof l.address === "number") addresses.push(l.address);
+    }
+    const addrBuf = Buffer.alloc(addresses.length * 2);
+    for (let i = 0; i < addresses.length; i++) addrBuf.writeUInt16BE(addresses[i] & 0xffff, i * 2);
     const addAddrPDU = buildProxyConfigPDU(
       this.nid, this.encKey, this.privKey,
       this.nextSeq(), LOCAL_ADDRESS, this.ivIndex,
       PROXY_CFG_ADD_ADDRESSES,
       addrBuf
     );
-    console.log(`  → Proxy: Add Addresses [0x0001, 0xFFFF, 0xC000]  ${addAddrPDU.toString("hex")}`);
-    await this.dataIn.writeAsync(addAddrPDU, true);
+    console.log(`  → Proxy: Add Addresses [${addresses.map(a => "0x" + a.toString(16).padStart(4, "0")).join(", ")}]  ${addAddrPDU.toString("hex")}`);
+    await this.writeWithTimeout(this.dataIn, addAddrPDU, true);
 
     // Small settling gap before commands
     await new Promise(r => setTimeout(r, 300));
-    console.log("Proxy filter configured — ready to send commands");
+    console.log("Proxy filter configured — ready");
   }
 
   private nextSeq(): number {
@@ -559,7 +579,7 @@ export class MeshController {
       );
       if (i === 0) console.log(`  → dst=0x${dst.toString(16).padStart(4,"0")} opcode=0x${opcode.toString(16).padStart(4,"0")} try=${i+1}/${retries} payload=${pdu.toString("hex")}`);
       else console.log(`    retry ${i+1} seq=${seq} payload=${pdu.toString("hex")}`);
-      await this.dataIn.writeAsync(pdu, true);
+      await this.writeWithTimeout(this.dataIn, pdu, true, 1500);
       await new Promise(r => setTimeout(r, 80)); // small gap between retries
     }
   }
