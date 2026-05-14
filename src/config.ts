@@ -8,11 +8,27 @@ export interface LightConfig {
   address: number; // mesh unicast address
 }
 
+export interface HttpConfig {
+  port: number;   // default 2708
+  host: string;   // default "0.0.0.0"
+  apiKey?: string; // if set, requests must include Authorization: Bearer <apiKey>
+}
+
+export interface MqttConfig {
+  broker: string;          // e.g. "mqtt://localhost:1883"
+  username?: string;
+  password?: string;
+  discoveryPrefix?: string; // default "homeassistant"
+  topicPrefix?: string;     // default "amaran"
+}
+
 export interface Config {
   netKey: string;        // hex string, 32 chars
   appKey: string;        // hex string, 32 chars
   relayHub: string;      // MAC address of the light to connect through as BLE Mesh Proxy
   lights: LightConfig[];
+  http?: HttpConfig;
+  mqtt?: MqttConfig;
 }
 
 const CONFIG_PATH = path.join(process.cwd(), "lights.json");

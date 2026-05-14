@@ -58,8 +58,9 @@ Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, 
 | Script | Description |
 |--------|-------------|
 | `setup` | Run setup wizard (one time) |
-| `daemon:start` | Start persistent background daemon |
+| `daemon:start` | Start persistent background daemon (also starts HTTP server) |
 | `daemon:stop` | Stop daemon |
+| `mqtt:start` | Start MQTT bridge for Home Assistant |
 | `mesh:on` | Turn all lights on |
 | `mesh:off` | Turn all lights off |
 | `mesh:brightness <n>` | Set brightness 0-100 |
@@ -118,6 +119,73 @@ All commands use a 10-byte payload: `[checksum, ...packed_bits..., cmd_value, cm
 | HSI | `0x81` | hue (9 bits) at bits 53-61; saturation (7 bits) at bits 46-52 |
 
 See `DIRECT-BLE-CONTROL.md` for full reverse-engineering notes.
+
+---
+
+## HTTP REST API
+
+When the daemon is running, a REST API is available at `http://localhost:2708`
+(configurable via `lights.json`).
+
+```bash
+# List lights / health check
+curl http://localhost:2708/
+
+# Turn all on/off
+curl -X POST http://localhost:2708/lights/on
+curl -X POST http://localhost:2708/lights/off
+
+# Target a specific light (use key from lights.json)
+curl -X POST http://localhost:2708/lights/keylight/on
+curl -X POST http://localhost:2708/lights/keylight/brightness \
+  -H 'Content-Type: application/json' -d '{"value": 75}'
+
+curl -X POST http://localhost:2708/lights/all/cct \
+  -H 'Content-Type: application/json' \
+  -d '{"brightness": 80, "kelvin": 5600, "gm": 10}'
+
+curl -X POST http://localhost:2708/lights/all/hsi \
+  -H 'Content-Type: application/json' \
+  -d '{"brightness": 80, "hue": 45, "saturation": 60}'
+```
+
+Configure port and optional API key in `lights.json`:
+```json
+{
+  "http": { "port": 2708, "host": "0.0.0.0", "apiKey": "my-secret" }
+}
+```
+
+## Home Assistant Integration
+
+### Option A — MQTT Discovery (recommended)
+
+1. Install Mosquitto on the HA host (Add-on store)
+2. Add to `lights.json`:
+```json
+{
+  "mqtt": { "broker": "mqtt://homeassistant.local:1883", "username": "...", "password": "..." }
+}
+```
+3. Run `npm run mqtt:start` (alongside the daemon)
+
+Each light auto-appears in HA as a **Light entity** with on/off, brightness slider,
+color temperature, and HSI color — no YAML config required.
+
+### Option B — REST via `rest_command`
+
+```yaml
+# configuration.yaml
+rest_command:
+  amaran_on:
+    url: "http://mac.local:2708/lights/on"
+    method: POST
+  amaran_brightness:
+    url: "http://mac.local:2708/lights/all/brightness"
+    method: POST
+    content_type: application/json
+    payload: '{"value": {{ brightness }}}'
+```
 
 ## Requirements
 

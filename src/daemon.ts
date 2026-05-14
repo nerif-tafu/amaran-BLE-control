@@ -8,6 +8,7 @@
  */
 
 import * as net from "net";
+import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import { SOCKET_PATH, PID_PATH } from "./daemon-paths.js";
@@ -128,13 +129,98 @@ async function runDaemon() {
     console.log(`Daemon PID ${process.pid} running`);
   });
 
+  // ── HTTP REST server ─────────────────────────────────────────────────────────
+  const httpCfg = config.http ?? { port: 2708, host: "0.0.0.0" };
+
+  function readBody(req: http.IncomingMessage): Promise<any> {
+    return new Promise((resolve, reject) => {
+      let raw = "";
+      req.on("data", c => { raw += c; });
+      req.on("end", () => {
+        if (!raw) { resolve({}); return; }
+        try { resolve(JSON.parse(raw)); } catch { reject(new Error("Invalid JSON body")); }
+      });
+    });
+  }
+
+  function jsonResponse(res: http.ServerResponse, status: number, body: object) {
+    res.writeHead(status, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    });
+    res.end(JSON.stringify(body));
+  }
+
+  const httpServer = http.createServer(async (req, res) => {
+    // CORS preflight
+    if (req.method === "OPTIONS") { jsonResponse(res, 204, {}); return; }
+
+    // Optional API key auth
+    if (httpCfg.apiKey) {
+      const authHeader = req.headers["authorization"] ?? "";
+      if (authHeader !== `Bearer ${httpCfg.apiKey}`) {
+        jsonResponse(res, 401, { ok: false, error: "Unauthorized" });
+        return;
+      }
+    }
+
+    const url = req.url ?? "/";
+    const method = req.method ?? "GET";
+
+    try {
+      // GET / or GET /lights — list lights / health check
+      if (method === "GET" && (url === "/" || url === "/lights")) {
+        jsonResponse(res, 200, { ok: true, lights: ctrl.lights, daemon: true });
+        return;
+      }
+
+      // Route: POST /lights/on  or  POST /lights/off
+      const allMatch = url.match(/^\/lights\/(on|off)$/);
+      if (method === "POST" && allMatch) {
+        const result = await runCommand({ cmd: allMatch[1], args: [] });
+        jsonResponse(res, 200, { ok: true, result });
+        return;
+      }
+
+      // Route: POST /lights/:key/on|off|brightness|cct|hsi
+      const lightMatch = url.match(/^\/lights\/([^/]+)\/([^/]+)$/);
+      if (method === "POST" && lightMatch) {
+        const [, lightKey, cmd] = lightMatch;
+        const body = await readBody(req);
+        let args: string[] = [];
+        if (cmd === "brightness" && body.value !== undefined) args = [String(body.value)];
+        if (cmd === "cct") args = [String(body.brightness ?? 80), String(body.kelvin ?? 5600), String(body.gm ?? 0)];
+        if (cmd === "hsi" || cmd === "hsl") args = [String(body.brightness ?? 80), String(body.hue ?? 0), String(body.saturation ?? 100)];
+        const result = await runCommand({ cmd, args, light: lightKey === "all" ? undefined : lightKey });
+        jsonResponse(res, 200, { ok: true, result });
+        return;
+      }
+
+      jsonResponse(res, 404, { ok: false, error: `No route for ${method} ${url}` });
+    } catch (e: any) {
+      jsonResponse(res, 400, { ok: false, error: e.message });
+    }
+  });
+
+  httpServer.listen(httpCfg.port, httpCfg.host, () => {
+    console.log(`HTTP API → http://${httpCfg.host === "0.0.0.0" ? "localhost" : httpCfg.host}:${httpCfg.port}`);
+  });
+
   function cleanup() {
     if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);
     if (fs.existsSync(PID_PATH)) fs.unlinkSync(PID_PATH);
   }
 
-  process.on("SIGTERM", async () => { await ctrl.disconnect(); cleanup(); process.exit(0); });
-  process.on("SIGINT",  async () => { await ctrl.disconnect(); cleanup(); process.exit(0); });
+  const shutdown = async () => {
+    httpServer.close();
+    await ctrl.disconnect();
+    cleanup();
+    process.exit(0);
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT",  shutdown);
 }
 
 // Only run as daemon when this file is the main entry point, not when imported.

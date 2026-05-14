@@ -10,6 +10,7 @@
     "setup": "tsx src/setup.ts",
     "daemon:start": "tsx src/daemon.ts",
     "daemon:stop": "tsx src/cli.ts stop",
+    "mqtt:start": "tsx src/mqtt-bridge.ts",
     "amaran": "tsx src/cli.ts",
     "mesh:on": "tsx src/cli.ts on",
     "mesh:off": "tsx src/cli.ts off",
@@ -24,12 +25,20 @@
     "py:cct": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py cct",
     "build": "tsc"
   },
-  "keywords": ["amaran", "aputure", "bluetooth", "ble", "light", "control"],
+  "keywords": [
+    "amaran",
+    "aputure",
+    "bluetooth",
+    "ble",
+    "light",
+    "control"
+  ],
   "author": "Wes Bos (https://wesbos.com/)",
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@abandonware/noble": "^1.9.2-26"
+    "@abandonware/noble": "^1.9.2-26",
+    "mqtt": "^5.15.1"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",
