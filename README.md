@@ -6,86 +6,123 @@ Direct Bluetooth Mesh control of Amaran studio lights — **no Amaran Desktop ap
 
 ```bash
 npm install
+npm run setup        # reads your amaran.db and writes lights.json (one time)
 
+# Slow path (~10s startup per command, no daemon needed):
 npm run mesh:on
 npm run mesh:off
-npm run mesh:brightness 75        # 75%
-npm run mesh:cct 80 5600          # 80%, 5600K
-npm run mesh:cct 80 5600 15       # 80%, 5600K, GM +15 (green)
-npm run mesh:hsi 80 45 60         # 80% brightness, 45° hue, 60% saturation
+
+# Fast path (~0.6s per command):
+npm run daemon:start    # connect once, stay connected
+npm run mesh:on         # instant
+npm run mesh:brightness 75
+npm run mesh:off
+npm run daemon:stop
 ```
+
+## Setup
+
+`npm run setup` reads `~/Library/Application Support/amaran Desktop/*/amaran.db`
+and writes a `lights.json` config file. Run it once after installing.
+
+If the Amaran app isn't installed, run setup and enter your mesh keys manually.
+
+## Commands
+
+```bash
+npx tsx src/cli.ts on
+npx tsx src/cli.ts off
+npx tsx src/cli.ts brightness 75
+npx tsx src/cli.ts cct 80 5600          # 80% brightness, 5600K
+npx tsx src/cli.ts cct 80 5600 15       # with GM +15 (green bias)
+npx tsx src/cli.ts hsi 80 45 60         # hue 45°, saturation 60%
+
+# Target a specific light:
+npx tsx src/cli.ts brightness 50 key
+npx tsx src/cli.ts on back
+npx tsx src/cli.ts off halo
+
+# Daemon management:
+npx tsx src/cli.ts start    # start background daemon
+npx tsx src/cli.ts stop     # stop daemon
+npx tsx src/cli.ts lights   # list configured lights
+
+# Interactive REPL (keeps connection open):
+npx tsx src/cli.ts
+```
+
+Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, `mesh:hsi`.
 
 ## npm Scripts
 
-| Script | Args | Description |
-|--------|------|-------------|
-| `mesh:on` | | Turn all lights on |
-| `mesh:off` | | Turn all lights off |
-| `mesh:brightness` | `<0-100>` | Set brightness % |
-| `mesh:cct` | `<brightness> <kelvin> [gm]` | CCT — brightness 0-100, kelvin 2500-7500, optional GM -50 to +50 |
-| `mesh:hsi` | `<brightness> <hue> <saturation>` | HSI color — brightness 0-100, hue 0-360°, saturation 0-100 |
-| `py:on` | | Turn on via Python SDK fallback |
-| `py:off` | | Turn off via Python SDK fallback |
-| `py:brightness` | `<0-100>` | Brightness via Python SDK |
-| `py:cct` | `<brightness> <kelvin>` | CCT via Python SDK |
-| `scan` | | Scan for nearby BLE devices |
-| `discover` | `<addr>` | List services on a device |
-
-Individual lights can be targeted by appending `key`, `back`, or `halo`:
-```bash
-npx tsx src/mesh-controller.ts brightness 50 key
-```
+| Script | Description |
+|--------|-------------|
+| `setup` | Run setup wizard (one time) |
+| `daemon:start` | Start persistent background daemon |
+| `daemon:stop` | Stop daemon |
+| `mesh:on` | Turn all lights on |
+| `mesh:off` | Turn all lights off |
+| `mesh:brightness <n>` | Set brightness 0-100 |
+| `mesh:cct <b> <k> [gm]` | CCT: brightness 0-100, kelvin 2500-7500, GM -50..+50 |
+| `mesh:hsi <b> <h> <s>` | HSI: brightness, hue 0-360°, saturation 0-100 |
+| `py:on/off/brightness/cct` | Python SDK fallback (slower, more reliable) |
+| `scan` | Scan for BLE devices |
+| `discover <addr>` | Inspect a device's services |
 
 ## How It Works
 
-`src/mesh-controller.ts` implements a full BLE Mesh stack and connects to the
-Key Light as a Mesh Proxy client. All physical controls use **Telink proprietary
-opcode `0x26`** — reverse-engineered from `vendor/PyMeshSDK/PyMeshSDK.so` by
-intercepting `CBPeripheral.writeValue` while the SDK ran, then decrypting the
-captured BLE Mesh PDU.
+**`src/cli.ts`** — main entry point. If the daemon is running, sends commands
+over a Unix socket (instant). Otherwise connects directly (slow startup).
 
-Standard BLE Mesh models (Generic OnOff, Light Lightness, CTL) ARE present and
-respond, but they are decoupled from the physical LED output on these lights.
+**`src/daemon.ts`** — background process that stays BLE-connected and accepts
+commands via `/tmp/amaran-light.sock`. Start with `npm run daemon:start`.
 
-`src/pymesh-controller.py` is a Python fallback that loads the actual
-Telink SigMeshLib from `vendor/PyMeshSDK/PyMeshSDK.so`.
+**`src/mesh-controller.ts`** — full BLE Mesh stack (crypto, proxy protocol,
+command encoding). All physical controls use **Telink proprietary opcode `0x26`**,
+reverse-engineered from `vendor/PyMeshSDK/PyMeshSDK.so`.
 
-## Mesh Network Config (from `amaran.db`)
+**`src/setup.ts`** — reads `amaran.db` to extract mesh keys and light addresses,
+writes `lights.json`.
 
-Keys extracted from `~/Library/Application Support/amaran Desktop/*/amaran.db`:
+Standard BLE Mesh models (Generic OnOff, Light Lightness) respond correctly but
+are decoupled from the physical LED output. Opcode `0x26` is what actually
+controls sleep/wake, brightness, CCT, and HSI.
 
-| | Value |
-|--|--|
-| Net Key | `0D8094267D3F4EA5B06B324C8C0AD926` |
-| App Key | `AB1C91DC421149FF87694B05A236F214` |
-| NID | `0x3B` |
-| EncKey | `ce1a0749c640a23be0bdf1c7c95fce93` |
-| PrivKey | `96b5a15d3b3d3fa366251132ba16491c` |
+## Config (`lights.json`)
 
-## Lights
+Generated by `npm run setup`. Gitignored — each user generates their own.
 
-| Name | MAC | BLE UUID (macOS) | Mesh Addr |
-|------|-----|-----------------|-----------|
-| Key Light | A4:C1:38:13:41:38 | `B3ED1263-A930-4E51-32B3-EDFBB4C71AEC` | 2 |
-| Back Light | A4:C1:38:13:30:86 | `D16927EE-947B-5A0C-ED73-358C29BC4BCD` | 4 |
-| Halo 100x | A4:C1:38:56:8C:EF | `F2D070F8-804F-3221-0C60-D56F36767ACC` | 6 |
+```json
+{
+  "netKey": "...", "appKey": "...",
+  "relayHub": "A4:C1:38:13:41:38",
+  "lights": [
+    { "key": "key",  "name": "Key Light",  "mac": "A4:C1:38:13:41:38", "address": 2 },
+    { "key": "back", "name": "Back Light", "mac": "A4:C1:38:13:30:86", "address": 4 },
+    { "key": "halo", "name": "Halo 100x",  "mac": "A4:C1:38:56:8C:EF", "address": 6 }
+  ]
+}
+```
+
+See `lights.example.json` for the template.
 
 ## Command Payload Format (opcode `0x26`)
 
-All commands share a 10-byte payload: `[checksum, ...packed_bits..., cmd_value, cmd_type]`
+All commands use a 10-byte payload: `[checksum, ...packed_bits..., cmd_value, cmd_type]`
 
-| Mode | cmd_type | Encoding |
-|------|----------|----------|
-| On/Off | `0x8C` | byte[8] = 0x01 on / 0x00 off |
-| Brightness | `0x8F` | intensity (0-1000): byte[7] = low2 bits × 64, byte[8] = upper 8 bits |
-| CCT | `0x82` | kelvin → `(k+24)&0x3FF` packed at bits 52-61; GM at bits 43-51; intensity same as brightness |
-| HSI | `0x81` | hue (9 bits) at bits 53-61; saturation (7 bits) at bits 46-52; intensity as above |
+| Mode | `cmd_type` | Notes |
+|------|-----------|-------|
+| On/Off | `0x8C` | `byte[8]` = 0x01 on / 0x00 off |
+| Brightness | `0x8F` | intensity 0-1000; low 2 bits at `byte[7]`, upper 8 at `byte[8]` |
+| CCT | `0x82` | kelvin packed as `(k+24)&0x3FF` at bits 52-61; GM at bits 43-51 |
+| HSI | `0x81` | hue (9 bits) at bits 53-61; saturation (7 bits) at bits 46-52 |
 
-See `DIRECT-BLE-CONTROL.md` for the full reverse-engineering research notes.
+See `DIRECT-BLE-CONTROL.md` for full reverse-engineering notes.
 
 ## Requirements
 
-- Node.js 18+ (`npm install`)
-- Python 3.11 for `py:*` scripts: `brew install python@3.11`
-- Amaran Desktop app **closed** (it holds the BLE connection)
-- Bluetooth permission granted to Terminal/iTerm
+- Node.js 18+
+- macOS (CoreBluetooth via `@abandonware/noble`)
+- Python 3.11 for `py:*` fallback scripts: `brew install python@3.11`
+- Amaran Desktop app **closed** when running (it holds the BLE connection)
+- Bluetooth permission granted to Terminal / iTerm
