@@ -101,12 +101,10 @@ async function runDaemon() {
           command_topic: `${topicPrefix}/${light.key}/set`,
           state_topic:   `${topicPrefix}/${light.key}/state`,
           availability_topic: `${topicPrefix}/status`,
-          brightness: true,
+          supported_color_modes: ["color_temp", "hs"],
           brightness_scale: 255,
-          color_temp: true,
           min_mireds: kelvinToMireds(7500),
           max_mireds: kelvinToMireds(2500),
-          hs: true,
           device: {
             identifiers: [`amaran_${light.key}`],
             name: light.name,
