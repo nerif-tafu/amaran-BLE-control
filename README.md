@@ -58,9 +58,8 @@ Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, 
 | Script | Description |
 |--------|-------------|
 | `setup` | Run setup wizard (one time) |
-| `daemon:start` | Start persistent background daemon (also starts HTTP server) |
+| `daemon:start` | Start daemon (also serves HTTP + MQTT if configured) |
 | `daemon:stop` | Stop daemon |
-| `mqtt:start` | Start MQTT bridge for Home Assistant |
 | `mesh:on` | Turn all lights on |
 | `mesh:off` | Turn all lights off |
 | `mesh:brightness <n>` | Set brightness 0-100 |
@@ -167,10 +166,11 @@ Configure port and optional API key in `lights.json`:
   "mqtt": { "broker": "mqtt://homeassistant.local:1883", "username": "...", "password": "..." }
 }
 ```
-3. Run `npm run mqtt:start` (alongside the daemon)
+3. Run `npm run daemon:start` — MQTT connects automatically when the config is present
 
 Each light auto-appears in HA as a **Light entity** with on/off, brightness slider,
-color temperature, and HSI color — no YAML config required.
+color temperature, and HSI color — no YAML config required. State stays in sync
+regardless of whether you use HA, the CLI, HTTP, or the REPL.
 
 ### Option B — REST via `rest_command`
 

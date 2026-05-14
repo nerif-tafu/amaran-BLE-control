@@ -56,6 +56,38 @@ async function runDaemon() {
       will: { topic: `${topicPrefix}/status`, payload: "offline", retain: true, qos: 1 },
     });
 
+    const haToPercent = (v: number) => Math.round((v / 255) * 100);
+    const miredsToKelvin = (m: number) => Math.round(1000000 / m);
+
+    // Subscribe to HA command topics and forward to runCommand
+    mqttClient.subscribe(`${topicPrefix}/+/set`);
+    mqttClient.on("message", async (topic: string, message: Buffer) => {
+      const match = topic.match(new RegExp(`^${topicPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/([^/]+)/set$`));
+      if (!match) return;
+      const lightKey = match[1];
+      let cmd: any;
+      try { cmd = JSON.parse(message.toString()); } catch { return; }
+
+      try {
+        if (cmd.state !== undefined) {
+          const on = String(cmd.state).toUpperCase() === "ON";
+          await runCommand({ cmd: on ? "on" : "off", args: [], light: lightKey });
+          if (!on) return;
+        }
+        if (cmd.color_temp !== undefined) {
+          const b = cmd.brightness !== undefined ? haToPercent(cmd.brightness) : 80;
+          await runCommand({ cmd: "cct", args: [String(b), String(miredsToKelvin(cmd.color_temp)), "0"], light: lightKey });
+        } else if (cmd.hs_color !== undefined) {
+          const b = cmd.brightness !== undefined ? haToPercent(cmd.brightness) : 80;
+          await runCommand({ cmd: "hsi", args: [String(b), String(cmd.hs_color[0]), String(cmd.hs_color[1])], light: lightKey });
+        } else if (cmd.brightness !== undefined) {
+          await runCommand({ cmd: "brightness", args: [String(haToPercent(cmd.brightness))], light: lightKey });
+        }
+      } catch (e: any) {
+        console.warn(`MQTT command failed for ${lightKey}:`, e.message);
+      }
+    });
+
     mqttClient.on("connect", () => {
       console.log("MQTT connected — publishing discovery");
       mqttClient.publish(`${topicPrefix}/status`, "online", { retain: true });

@@ -10,7 +10,6 @@
     "setup": "tsx src/setup.ts",
     "daemon:start": "tsx src/daemon.ts",
     "daemon:stop": "tsx src/cli.ts stop",
-    "mqtt:start": "tsx src/mqtt-bridge.ts",
     "amaran": "tsx src/cli.ts",
     "mesh:on": "tsx src/cli.ts on",
     "mesh:off": "tsx src/cli.ts off",
