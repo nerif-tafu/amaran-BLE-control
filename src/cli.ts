@@ -152,6 +152,17 @@ async function runCommandOnController(
         throw new Error(`Unknown command: ${cmd}. Try: on, off, brightness, cct, hsi`);
     }
   }
+
+  // Nudge fixtures to broadcast their new state so the ESP32 bridge / desktop
+  // app pick up the change immediately rather than on the next poll. Mirrors
+  // the firmware's schedule_refresh().
+  const refreshAddrs = targets.includes(0xffff)
+    ? ctrl.lights.map((l: any) => l.address)
+    : targets;
+  for (const addr of refreshAddrs) {
+    await ctrl.statusRequest(addr);
+    await new Promise(r => setTimeout(r, 80));
+  }
 }
 
 // ── REPL mode ─────────────────────────────────────────────────────────────────

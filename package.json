@@ -18,6 +18,10 @@
     "mesh:hsi": "tsx src/cli.ts hsi",
     "scan": "tsx src/ble-scanner.ts scan",
     "discover": "tsx src/ble-scanner.ts connect",
+    "gen-config": "tsx scripts/generate-config.ts",
+    "mqtt:watch": "tsx scripts/mqtt-watch.ts",
+    "esp32:capture": "tsx scripts/esp32-capture.ts",
+    "esp32:probe": "tsx scripts/esp32-probe.ts",
     "build": "tsc"
   },
   "keywords": [
@@ -33,7 +37,8 @@
   "type": "module",
   "dependencies": {
     "@abandonware/noble": "^1.9.2-26",
-    "mqtt": "^5.15.1"
+    "mqtt": "^5.15.1",
+    "serialport": "^12.0.0"
   },
   "devDependencies": {
     "@types/node": "^25.0.10",

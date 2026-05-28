@@ -31,12 +31,14 @@ desktop and iPad apps keep working alongside it.
 # 1. Install ESP-IDF v5.3.x and source it into your shell.
 . ~/esp/esp-idf/export.sh
 
-cd esp32-firmware
+# 2. Generate esp32-firmware/main/mesh_config.h from the amaran Desktop DB.
+#    Pulls mesh keys, fixtures, and per-fixture capabilities (color / G-M /
+#    CCT range) from the app's bundled fixture_config.json. Run from the
+#    repo root (it's a TypeScript tool in the main project):
+npm install
+npm run gen-config         # options: -- --db <path> --relay-hub <MAC>
 
-# 2. Generate main/mesh_config.h from the amaran Desktop DB. Pulls mesh
-#    keys, fixtures, and per-fixture capabilities (color / G-M / CCT range)
-#    from the app's bundled fixture_config.json.
-./scripts/generate_config.py
+cd esp32-firmware
 
 # 3. Copy the Wi-Fi/MQTT template and fill in your values.
 cp main/wifi_config.h.example main/wifi_config.h
@@ -179,14 +181,15 @@ Inbound (lights → HA) — the status snoop:
 
 ### Debugging the snoop
 
-`scripts/` has helpers used to reverse-engineer and verify the reply
-format (set `CONFIG_BLE_MESH_STACK_TRACE_LEVEL=3` to see the raw decrypted
-PDUs logged by the patch):
-- `probe_state.py "<repl command>"` — send a command, print the resulting
-  decoded status replies per fixture.
-- `mqtt_watch.py [secs]` — dependency-free MQTT subscriber that dumps the
-  retained `amaran/.../state` topics to confirm what reached the broker.
-- `capture_refresh.py [secs]` — trigger a refresh and dump raw serial.
+TypeScript helpers in the **main project** (`../scripts/`, run from the repo
+root) verify the reply format. For the probe, build the firmware with
+`CONFIG_BLE_MESH_STACK_TRACE_LEVEL=3` so the patch logs the raw decrypted PDUs:
+- `npm run esp32:probe -- "<repl command>"` — send a command, decode the
+  resulting status replies per fixture using the shared `src/telink.ts`
+  decoder (the same logic the firmware uses — a cross-check that they agree).
+- `npm run mqtt:watch` — subscribe to the `amaran/.../state` topics to confirm
+  what reached the broker (reads broker/creds from `lights.json`).
+- `npm run esp32:capture` — trigger a refresh and dump raw serial.
 
 ## Layout
 
@@ -195,12 +198,7 @@ esp32-firmware/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults          Bluedroid + BLE Mesh + Wi-Fi + HTTP + MQTT, 4 MB flash
 ├── partitions.csv              3 MB factory app partition
-├── patches/                   ESP-IDF core patch for the inbound status snoop (required)
-├── scripts/
-│   ├── generate_config.py      reads amaran.db + app fixture_config.json → main/mesh_config.h
-│   ├── probe_state.py          send a REPL command, print decoded status replies
-│   ├── mqtt_watch.py           dependency-free MQTT subscriber for amaran/.../state
-│   └── capture_refresh.py      trigger a refresh, dump raw serial
+├── patches/                    ESP-IDF core patch for the inbound status snoop (required)
 └── main/
     ├── main.c                  app_main, mesh self-provision, dispatch, UART REPL, poll
     ├── mesh_config.h           generated; KEY-BEARING; .gitignore'd
@@ -211,6 +209,10 @@ esp32-firmware/
     ├── mqtt.[ch]               MQTT client, HA discovery, command parsing, debounced state
     └── http.[ch]               HTTP REST API
 ```
+
+Build/debug tooling lives in the **main TS project** (`scripts/`, run from the
+repo root): `gen-config` (writes `main/mesh_config.h`), `esp32:probe`,
+`esp32:capture`, and `mqtt:watch`.
 
 ## How it works
 
@@ -234,14 +236,14 @@ and cross-checked against it.
 
 ## Maintenance
 
-- **New fixture or new mesh keys in Sidus:** re-run
-  `./scripts/generate_config.py`, then `idf.py build flash`. If the mesh
-  keys themselves changed, `idf.py -p <port> erase-flash` first to clear
-  stale NVS provisioning.
+- **New fixture or new mesh keys in Sidus:** re-run `npm run gen-config`
+  (from the repo root), then `idf.py build flash`. If the mesh keys
+  themselves changed, `idf.py -p <port> erase-flash` first to clear stale
+  NVS provisioning.
 - **Unknown fixture code:** capabilities come from the amaran app's
   `fixture_config.json`. Fixtures missing from it (e.g. the Halo / 401C5
   on older app versions) fall back to a small table in
-  `generate_config.py` — edit `FALLBACK_CAPS` there if a fixture's
+  `scripts/generate-config.ts` — edit `FALLBACK_CAPS` there if a fixture's
   color/G-M/CCT is wrong.
 - **Wi-Fi + BLE coexistence** is handled by the software-coex layer (on
   by default). A single reconnect retry at boot is normal.

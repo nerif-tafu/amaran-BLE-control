@@ -70,10 +70,18 @@ Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, 
 | `mesh:on`                  | Turn all lights on                                   |
 | `mesh:off`                 | Turn all lights off                                  |
 | `mesh:brightness <n>`      | Set brightness 0-100                                 |
-| `mesh:cct <b> <k> [gm]`    | CCT: brightness 0-100, kelvin 2500-7500, GM -50..+50 |
+| `mesh:cct <b> <k> [gm]`    | CCT: brightness 0-100, kelvin 2500-7500, GM -10..+10 |
 | `mesh:hsi <b> <h> <s>`     | HSI: brightness, hue 0-360°, saturation 0-100        |
 | `scan`                     | Scan for BLE devices                                 |
 | `discover <addr>`          | Inspect a device's services                          |
+| `gen-config`               | Write `esp32-firmware/main/mesh_config.h` from `amaran.db` |
+| `mqtt:watch`               | Subscribe to the `amaran/.../state` topics            |
+| `esp32:probe -- "<cmd>"`   | Send a REPL command to the ESP32, decode its replies  |
+| `esp32:capture`            | Trigger a refresh on the ESP32, dump raw serial       |
+
+After any command, the controller now also sends a Telink status-request so
+fixtures broadcast their new state immediately — the ESP32 bridge and the
+desktop app pick up the change right away instead of on the next poll.
 
 ## How It Works
 

@@ -240,6 +240,18 @@ async function runDaemon() {
           throw new Error(`Unknown command: ${cmd}`);
       }
     }
+    // Nudge fixtures to broadcast their new state so the ESP32 bridge / desktop
+    // app pick up the change immediately rather than on the next poll. Mirrors
+    // the firmware's schedule_refresh().
+    if (["on", "off", "brightness", "cct", "hsi", "hsl"].includes(cmd)) {
+      const refreshAddrs = targets.includes(0xffff)
+        ? ctrl.lights.map((l: any) => l.address)
+        : targets;
+      for (const a of refreshAddrs) {
+        await ctrl.statusRequest(a);
+        await new Promise(r => setTimeout(r, 80));
+      }
+    }
     return "ok";
   }
 
