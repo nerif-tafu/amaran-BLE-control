@@ -11,6 +11,7 @@ import * as crypto from "crypto";
 // @ts-ignore
 import noble from "@abandonware/noble";
 import type { Config, LightConfig } from "./config.js";
+import * as telink from "./telink.js";
 
 // Provisioner address (0x0001 is standard for SIG mesh provisioner).
 const LOCAL_ADDRESS = 0x0001;
@@ -584,86 +585,35 @@ export class MeshController {
     }
   }
 
-  // Build a 10-byte Telink proprietary command payload (reverse-engineered from PyMeshSDK.so).
-  // Format: [checksum, 0×7_zeros_or_low_bits, cmd_value_low, cmd_type]
-  // checksum = sum(bytes[1..9]) & 0xFF, stored at byte[0].
-  private telinkPayload(cmdType: number, cmdValue: number): Buffer {
-    const p = Buffer.alloc(10);
-    p[8] = cmdValue & 0xff;
-    p[9] = cmdType & 0xff;
-    // Bytes 0-7 encode extra bits for high-precision values — zero for typical sleep/brightness
-    let sum = 0;
-    for (let i = 1; i < 10; i++) sum += p[i];
-    p[0] = sum & 0xff;
-    return p;
-  }
-
+  // All Telink 0x26 payloads are built by the shared ./telink module, which
+  // is ported from the verified ESP32 firmware (telink.c).
   async setOnOffBlast(dst: number, on: boolean): Promise<void> {
-    // Use Telink proprietary opcode 0x26 with sleep/wake payload (cmd_type=0x8C).
-    // Verified by intercepting CBPeripheral.writeValue from PyMeshSDK.so:
-    //   sendOnOffCommand(0xFFFF, True)  →  opcode=0x26, params=[0x8D,0,0,0,0,0,0,0,0x01,0x8C]
-    const params = this.telinkPayload(0x8C, on ? 0x01 : 0x00);
-    await this.send(dst, OP.TELINK_CMD, params, 3);
+    await this.send(dst, OP.TELINK_CMD, telink.onoff(on), 3);
   }
 
-  // Telink brightness: reverse-engineered from sendBrightnessCommand in PyMeshSDK.so.
-  // intensity 0–1000 (multiply percent by 10).
-  // Low 2 bits of intensity go to byte[7] bits 6-7; upper bits go to byte[8]; cmd_type=0x8F.
+  // intensity 0–1000.
   async setTelinkBrightness(dst: number, intensity: number): Promise<void> {
-    const v = Math.max(0, Math.min(1000, intensity));
-    const p = Buffer.alloc(10, 0);
-    p[7] = (v & 3) << 6;
-    p[8] = (v >> 2) & 0xff;
-    p[9] = 0x8f;
-    let sum = 0;
-    for (let i = 1; i < 10; i++) sum += p[i];
-    p[0] = sum & 0xff;
-    await this.send(dst, OP.TELINK_CMD, p, 3);
+    await this.send(dst, OP.TELINK_CMD, telink.brightness(intensity), 3);
   }
 
-  // Telink CCT: reverse-engineered from sendCCTCommand in PyMeshSDK.so.
-  // kelvin 2500–7500, intensity 0–1000, gm -50 to +50.
-  // Kelvin packed via (kelvin+24)&0x3FF into bits 52-61. Bit 38 (byte[4]=0x40) always set.
-  // GM magnitude at bits 45-51 (7 bits), GM sign at bit 43. cmd_type=0x82.
+  // kelvin in K, intensity 0–1000, gm -10..+10 (0 = neutral). The CCT field
+  // is kelvin/10 — see telink.ts for the encoding (the old raw-kelvin version
+  // overflowed the 10-bit field and produced wrong colors).
   async setTelinkCCT(dst: number, kelvin: number, intensity: number, gm = 0): Promise<void> {
-    const v = Math.max(0, Math.min(1000, intensity));
-    const k = Math.max(2500, Math.min(10000, kelvin));
-    const g = Math.max(-50, Math.min(50, gm));
-    const w12 = (k + 24) & 0x3ff;
-    // GM encoding: gm_raw = |g| * 10, gm_encoded = gm_raw/10 = |g| via SDK formula.
-    // gm_flag=0 (green) or 1 (magenta) at bit 43.
-    const gm_encoded = Math.abs(g);   // 0-50, 7-bit value at bits 45-51
-    const gm_flag = g < 0 ? 1 : 0;    // sign bit at bit 43
-    const p = Buffer.alloc(10, 0);
-    p[4] = 0x40;                                             // bit 38 always set
-    p[5] = ((gm_encoded & 7) << 5) | (gm_flag << 3);        // gm bits0-2 at bits45-47, flag at bit43
-    p[6] = ((w12 & 0xf) << 4) | ((gm_encoded >> 3) & 0xf);  // cct bits0-3 at bits52-55, gm bits3-6 at bits48-51
-    p[7] = ((w12 >> 4) & 0x3f) | ((v & 3) << 6);            // cct bits4-9 at bits56-61, intensity low2 at bits62-63
-    p[8] = (v >> 2) & 0xff;
-    p[9] = 0x82;
-    let sum = 0;
-    for (let i = 1; i < 10; i++) sum += p[i];
-    p[0] = sum & 0xff;
-    await this.send(dst, OP.TELINK_CMD, p, 3);
+    await this.send(dst, OP.TELINK_CMD, telink.cct(kelvin, intensity, gm), 3);
   }
 
-  // Telink HSI: reverse-engineered from sendHSICommand in PyMeshSDK.so.
-  // hue 0-360, saturation 0-100, intensity 0-100%. cmd_type=0x81.
-  // Hue packed as 9 bits at bits 53-61, saturation 7 bits at bits 46-52.
+  // hue 0-360, saturation 0-100, intensity 0–1000.
   async setTelinkHSI(dst: number, hue: number, saturation: number, intensity: number): Promise<void> {
-    const v = Math.max(0, Math.min(1000, Math.round(intensity * 10)));
-    const h = Math.max(0, Math.min(360, hue)) & 0x1ff;  // 9 bits
-    const s = Math.max(0, Math.min(100, saturation)) & 0x7f;  // 7 bits
-    const p = Buffer.alloc(10, 0);
-    p[5] = (s & 3) << 6;                           // sat bits0-1 at bits46-47
-    p[6] = ((h & 7) << 5) | ((s >> 2) & 0x1f);    // hue bits0-2 at bits53-55, sat bits2-6 at bits48-52
-    p[7] = ((h >> 3) & 0x3f) | ((v & 3) << 6);    // hue bits3-8 at bits56-61, intensity low2 at bits62-63
-    p[8] = (v >> 2) & 0xff;
-    p[9] = 0x81;
-    let sum = 0;
-    for (let i = 1; i < 10; i++) sum += p[i];
-    p[0] = sum & 0xff;
-    await this.send(dst, OP.TELINK_CMD, p, 3);
+    await this.send(dst, OP.TELINK_CMD, telink.hsi(hue, saturation, intensity), 3);
+  }
+
+  // Status-request: makes the fixture broadcast its current state so the
+  // ESP32 bridge / desktop app re-sync immediately instead of waiting for a
+  // poll. Fire-and-forget (single send) — a missed one is caught by the next
+  // poll. Mirrors the firmware's schedule_refresh().
+  async statusRequest(dst: number): Promise<void> {
+    await this.send(dst, OP.TELINK_CMD, telink.statusRequest(), 1);
   }
 
   async setBrightness(dst: number, percent: number): Promise<void> {
@@ -675,7 +625,7 @@ export class MeshController {
   }
 
   async setHSL(dst: number, brightnessPercent: number, hueDeg: number, satPercent: number): Promise<void> {
-    await this.setTelinkHSI(dst, hueDeg, satPercent, brightnessPercent);
+    await this.setTelinkHSI(dst, hueDeg, satPercent, Math.round(brightnessPercent * 10));
   }
 
   async disconnect(): Promise<void> {
