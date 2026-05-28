@@ -1,0 +1,12 @@
+# Build output.
+build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+
+# Generated, key-bearing: do NOT commit.
+main/mesh_config.h
+
+# Wi-Fi / MQTT credentials, hand-edited from wifi_config.h.example.
+main/wifi_config.h

@@ -1,0 +1,7 @@
+# 4 MB flash. BLE Mesh stack alone uses ~1 MB; adding Wi-Fi + MQTT + HTTP
+# pushes the app close to 2 MB. NVS bumped to 0x10000 for mesh provisioning
+# state + a small store for runtime tweaks.
+# Name,   Type, SubType,  Offset,   Size,    Flags
+nvs,      data, nvs,      0x9000,   0x10000,
+phy_init, data, phy,      0x19000,  0x1000,
+factory,  app,  factory,  0x20000,  0x300000,

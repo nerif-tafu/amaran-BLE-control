@@ -2,6 +2,13 @@
 
 Direct Bluetooth Mesh control of Amaran studio lights — **no Amaran Desktop app required**.
 
+Two ways to drive the lights:
+
+- **macOS / Node.js** (this repo's `src/`) — control from your Mac over BLE. See below.
+- **ESP32 standalone node** ([`esp32-firmware/`](esp32-firmware/README.md)) — a
+  always-on hardware bridge that joins the mesh and exposes the lights to
+  **Home Assistant (MQTT)** and an **HTTP API**, no Mac required at runtime.
+
 ## Quick Start
 
 ```bash
