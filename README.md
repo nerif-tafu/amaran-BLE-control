@@ -189,7 +189,7 @@ Configure port and optional API key in `lights.json`:
 
 ## Home Assistant Integration
 
-### Option A — MQTT Discovery (recommended)
+Via MQTT discovery:
 
 1. Install Mosquitto on the HA host (Add-on store)
 2. Add to `lights.json`:
@@ -210,24 +210,39 @@ Each light auto-appears in HA as a **Light entity** with on/off, brightness slid
 color temperature, and HSI color — no YAML config required. State stays in sync
 regardless of whether you use HA, the CLI, HTTP, or the REPL.
 
-### Option B — REST via `rest_command`
+> The always-on **ESP32 bridge** (below) is the recommended way to run this with
+> Home Assistant — it doesn't need your Mac running and reflects changes made
+> from the desktop/iOS app too. See [`esp32-firmware/`](esp32-firmware/README.md).
 
-```yaml
-# configuration.yaml
-rest_command:
-  amaran_on:
-    url: "http://mac.local:2708/lights/on"
-    method: POST
-  amaran_brightness:
-    url: "http://mac.local:2708/lights/all/brightness"
-    method: POST
-    content_type: application/json
-    payload: '{"value": {{ brightness }}}'
+## Flashing the ESP32
+
+The ESP32 firmware is a standalone, always-on bridge that joins the mesh and
+exposes the lights to Home Assistant (MQTT) and an HTTP API — no Mac needed at
+runtime. Full details in [`esp32-firmware/README.md`](esp32-firmware/README.md);
+the short version:
+
+```sh
+# 1. Install ESP-IDF v5.3.x and source it into your shell.
+. ~/esp/esp-idf/export.sh
+
+# 2. Apply the required BLE Mesh core patch (enables inbound state sync).
+cd ~/esp/esp-idf
+git apply /path/to/amaran-light/esp32-firmware/patches/0001-amaran-net-recv-status-snoop.patch
+
+# 3. Generate the mesh config from the amaran Desktop DB (run from repo root).
+cd /path/to/amaran-light
+npm install
+npm run gen-config
+
+# 4. Fill in Wi-Fi + MQTT credentials.
+cd esp32-firmware
+cp main/wifi_config.h.example main/wifi_config.h
+$EDITOR main/wifi_config.h
+
+# 5. Build and flash (CP210x port shown; Ctrl+] exits the monitor).
+idf.py set-target esp32                          # first build only
+idf.py -p /dev/cu.SLAB_USBtoUART flash monitor
 ```
 
-## Requirements
-
-- Node.js 18+
-- macOS (CoreBluetooth via `@abandonware/noble`)
-- Amaran Desktop app **closed** when running (it holds the BLE connection)
-- Bluetooth permission granted to Terminal / iTerm
+`main/mesh_config.h` and `main/wifi_config.h` are **key-bearing and
+`.gitignore`'d — never commit them.**
