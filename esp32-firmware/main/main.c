@@ -187,6 +187,48 @@ static void config_server_cb(esp_ble_mesh_cfg_server_cb_event_t event,
     }
 }
 
+/* Map a fixture mesh address back to its config entry. */
+static const amaran_light_t *light_by_addr(uint16_t addr)
+{
+    for (size_t i = 0; i < AMARAN_LIGHT_COUNT; i++) {
+        if (AMARAN_LIGHTS[i].address == addr) {
+            return &AMARAN_LIGHTS[i];
+        }
+    }
+    return NULL;
+}
+
+/* Strong implementation of the weak hook in the patched BLE Mesh core
+ * (net.c). Called with the decrypted access payload of every inbound
+ * AppKey-encrypted unsegmented message — in particular the fixtures' 0x26
+ * status replies, which are addressed to the provisioner (0x0001) and so
+ * never reach the normal model dispatch on this node.
+ *
+ * We decode the payload (on/off, mode, brightness, cct+gm or hue/sat) and
+ * hand it to the MQTT layer, which updates Home Assistant only when it
+ * differs materially from what we last commanded — so external changes
+ * (desktop / iOS app, physical knob) flow through to HA while our own
+ * command echoes are suppressed. */
+void amaran_mesh_access_rx(uint16_t src, uint16_t dst,
+                           const uint8_t *data, uint16_t len)
+{
+    if (len < 11 || data[0] != VND_OPCODE_SEND) {
+        return;                         /* not a 10-byte Telink 0x26 payload */
+    }
+    amaran_status_t st;
+    if (!amaran_telink_decode_status(data + 1, &st)) {
+        return;                         /* 0x0a diagnostic page or bad checksum */
+    }
+
+    const amaran_light_t *l = light_by_addr(src);
+    ESP_LOGI(TAG, "STATUS %s on=%d %s bri=%u%% cct=%uK gm=%d hue=%u sat=%u",
+             l ? l->key : "?", st.on, st.is_hs ? "hsi" : "cct",
+             st.intensity / 10, st.cct_kelvin, st.gm, st.hue, st.sat);
+
+    amaran_mqtt_report_state(src, st.on, st.is_hs, st.intensity / 10,
+                             st.cct_kelvin, st.gm, st.hue, st.sat);
+}
+
 static void custom_model_cb(esp_ble_mesh_model_cb_event_t event,
                             esp_ble_mesh_model_cb_param_t *param)
 {

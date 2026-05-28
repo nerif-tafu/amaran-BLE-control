@@ -32,6 +32,15 @@ typedef struct {
 int amaran_mqtt_start(const amaran_mqtt_dispatch_t *dispatch);
 bool amaran_mqtt_is_connected(void);
 
+/* Report fixture state observed on the mesh (decoded from a 0x26 status
+ * reply — e.g. a change made from the desktop / iOS app or a physical
+ * knob). Updates HA's view only when a field differs materially from what
+ * we last commanded, so the echo of our own commands doesn't churn HA.
+ * brightness 0..100, cct in kelvin, gm -10..+10, hue 0..360, sat 0..100. */
+void amaran_mqtt_report_state(uint16_t addr, bool on, bool is_hs,
+                              int brightness_0_100, int cct_kelvin, int gm,
+                              int hue_0_360, int sat_0_100);
+
 #ifdef __cplusplus
 }
 #endif

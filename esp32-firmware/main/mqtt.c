@@ -306,6 +306,72 @@ static void handle_gm_for(int idx, const char *payload, int len)
     schedule_publish(idx);
 }
 
+static int idx_by_addr(uint16_t addr)
+{
+    for (int i = 0; i < AMARAN_LIGHT_COUNT; i++) {
+        if (AMARAN_LIGHTS[i].address == addr) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void amaran_mqtt_report_state(uint16_t addr, bool on, bool is_hs,
+                              int brightness, int cct_kelvin, int gm,
+                              int hue, int sat)
+{
+    int i = idx_by_addr(addr);
+    if (i < 0) {
+        return;
+    }
+    fixture_state_t *st = &s_state[i];
+    bool changed = false;
+
+    /* Thresholds suppress the echo of our own commands (the fixture reads
+     * back ~exactly what we set) while still catching genuine external
+     * changes from the desktop / iOS app or a physical knob. */
+    if (on != st->on) {
+        st->on = on;
+        changed = true;
+    }
+
+    if (on) {
+        if (abs(brightness - st->brightness) > 2) {
+            st->brightness = brightness;
+            changed = true;
+        }
+        if (is_hs != st->is_hs) {
+            st->is_hs = is_hs;
+            changed = true;
+        }
+        if (is_hs) {
+            if (abs(hue - st->hue) > 3) {
+                st->hue = hue;
+                changed = true;
+            }
+            if (abs(sat - st->sat) > 3) {
+                st->sat = sat;
+                changed = true;
+            }
+        } else {
+            if (cct_kelvin > 0 && abs(cct_kelvin - st->color_temp_k) > 60) {
+                st->color_temp_k = cct_kelvin;
+                st->color_temp_mired = 1000000 / cct_kelvin;
+                changed = true;
+            }
+            if (gm != st->gm) {
+                st->gm = gm;
+                changed = true;
+            }
+        }
+    }
+
+    if (changed) {
+        ESP_LOGI(TAG, "external change on %s -> publish", AMARAN_LIGHTS[i].key);
+        schedule_publish(i);
+    }
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data)
 {

@@ -82,6 +82,59 @@ uint8_t *amaran_telink_cct(uint16_t kelvin, uint16_t intensity_0_1000,
     return out;
 }
 
+bool amaran_telink_decode_status(const uint8_t p[10], amaran_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    /* Validate checksum (p[0] = sum of p[1..9] & 0xff). */
+    if (p[0] != checksum(p)) {
+        return false;
+    }
+
+    uint8_t cmd = p[9] & 0x7f;          /* high bit is opera_type (set vs report) */
+    out->command_type = cmd;
+
+    uint64_t low64 = 0;
+    for (int i = 0; i < 8; i++) {
+        low64 |= (uint64_t)p[i] << (i * 8);
+    }
+    uint16_t high16 = (uint16_t)p[8] | ((uint16_t)p[9] << 8);
+
+    out->on = (low64 >> 8) & 0x01;      /* power bit, 1 = on */
+
+    if (cmd == 0x02) {                  /* CCT mode */
+        out->is_hs = false;
+        int cct_raw = (int)((low64 >> 52) & 0x3ff);
+        int cct_flag = (int)((low64 >> 42) & 0x01);
+        int telink_cct = cct_flag ? cct_raw + 1000 : cct_raw;  /* kelvin/10 */
+        out->cct_kelvin = (uint16_t)(telink_cct * 10);
+        out->intensity = (uint16_t)((((uint32_t)high16 << 2) |
+                                     (uint32_t)((low64 >> 62) & 0x03)) & 0x3ff);
+        int gm_raw = (int)((low64 >> 45) & 0x7f);   /* 0..20, neutral 10 */
+        int gm = gm_raw - 10;
+        if (gm < -10) gm = -10;
+        if (gm > 10) gm = 10;
+        out->gm = gm;
+        out->valid = true;
+        return true;
+    }
+
+    if (cmd == 0x01) {                  /* HSI / color mode — same packing as setter */
+        out->is_hs = true;
+        uint16_t sat = (uint16_t)(((p[6] & 0x1f) << 2) | ((p[5] >> 6) & 0x03));
+        uint16_t hue = (uint16_t)(((p[7] & 0x3f) << 3) | ((p[6] >> 5) & 0x07));
+        uint16_t v   = (uint16_t)(((uint16_t)p[8] << 2) | ((p[7] >> 6) & 0x03));
+        out->sat = (uint8_t)(sat > 100 ? 100 : sat);
+        out->hue = hue > 360 ? 360 : hue;
+        out->intensity = v > 1000 ? 1000 : v;
+        out->valid = true;
+        return true;
+    }
+
+    /* command_type 0x0a (diagnostic) and anything else: not decoded. */
+    return false;
+}
+
 uint8_t *amaran_telink_hsi(uint16_t hue_deg, uint8_t saturation_0_100,
                            uint16_t intensity_0_1000, uint8_t out[10])
 {

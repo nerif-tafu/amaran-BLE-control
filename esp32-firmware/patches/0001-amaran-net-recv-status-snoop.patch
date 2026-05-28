@@ -1,0 +1,99 @@
+diff --git a/components/bt/esp_ble_mesh/core/net.c b/components/bt/esp_ble_mesh/core/net.c
+index 15d099cc..12d9f3c6 100644
+--- a/components/bt/esp_ble_mesh/core/net.c
++++ b/components/bt/esp_ble_mesh/core/net.c
+@@ -1892,6 +1892,82 @@ static bool ignore_net_msg(uint16_t src, uint16_t dst)
+     return false;
+ }
+ 
++/* ---- AMARAN passive status snoop --------------------------------------- *
++ * Telink fixtures send their 0x26 status reply addressed to the original
++ * provisioner (dst 0x0001), never to whoever requested the status. The
++ * normal access-layer dispatch therefore drops these on this node: the dst
++ * isn't one of our elements, and trans_unseg() bails before decrypting any
++ * non-local message. To let Home Assistant reflect changes made from the
++ * desktop / iOS app, we decrypt a copy of the access payload here using the
++ * studio AppKey and hand the plaintext to the application via a weak hook,
++ * without touching the relay path the original PDU follows.
++ *
++ * Defined weak so the core component links standalone; the firmware
++ * provides the strong implementation. */
++__attribute__((weak)) void amaran_mesh_access_rx(uint16_t src, uint16_t dst,
++                                                  const uint8_t *data,
++                                                  uint16_t len)
++{
++    (void)src; (void)dst; (void)data; (void)len;
++}
++
++static void amaran_snoop_access(struct bt_mesh_net_rx *rx,
++                                struct net_buf_simple *buf)
++{
++    if (rx->ctl) {
++        return;                         /* control message, not access */
++    }
++    /* Need at least: net header + transport hdr + 1-byte opcode + TransMIC. */
++    if (buf->len < BLE_MESH_NET_HDR_LEN + 1 + 1 + 4) {
++        return;
++    }
++
++    uint8_t *tp = buf->data + BLE_MESH_NET_HDR_LEN;
++    uint16_t tlen = buf->len - BLE_MESH_NET_HDR_LEN;
++    uint8_t thdr = tp[0];
++
++    if (thdr & 0x80) {
++        return;                         /* segmented; status replies are not */
++    }
++    if (!((thdr >> 6) & 0x01)) {
++        return;                         /* AKF=0 -> device-key, not app traffic */
++    }
++    uint8_t aid = thdr & 0x3f;
++
++    size_t count = bt_mesh_rx_appkey_size();
++    for (size_t i = 0; i < count; i++) {
++        struct bt_mesh_app_key *key = bt_mesh_rx_appkey_get(i);
++        if (!key || key->net_idx != rx->sub->net_idx) {
++            continue;
++        }
++        struct bt_mesh_app_keys *keys = (rx->new_key && key->updated)
++                                        ? &key->keys[1] : &key->keys[0];
++        if (aid != keys->id) {
++            continue;
++        }
++
++        struct net_buf_simple in;
++        net_buf_simple_init_with_data(&in, tp + 1, tlen - 1);
++        in.len -= 4;                    /* exclude TransMIC, as sdu_recv does */
++
++        uint8_t storage[32];
++        struct net_buf_simple out;
++        net_buf_simple_init_with_data(&out, storage, sizeof(storage));
++        out.len = 0;
++
++        if (bt_mesh_app_decrypt(keys->val, false, 0, &in, &out, NULL,
++                                rx->ctx.addr, rx->ctx.recv_dst, rx->seq,
++                                BLE_MESH_NET_IVI_RX(rx)) == 0) {
++            BT_INFO("AMARAN-STATUS src 0x%04x dst 0x%04x len %u: %s",
++                    rx->ctx.addr, rx->ctx.recv_dst, out.len,
++                    bt_hex(out.data, out.len));
++            amaran_mesh_access_rx(rx->ctx.addr, rx->ctx.recv_dst,
++                                  out.data, out.len);
++        }
++        return;
++    }
++}
++
+ void bt_mesh_net_recv(struct net_buf_simple *data, int8_t rssi,
+                       enum bt_mesh_net_if net_if)
+ {
+@@ -1909,6 +1985,11 @@ void bt_mesh_net_recv(struct net_buf_simple *data, int8_t rssi,
+         return;
+     }
+ 
++    /* AMARAN: snoop fixture status replies before the normal (dst-gated)
++     * dispatch runs. Does not consume or modify buf — the relay path below
++     * still sees the original PDU. */
++    amaran_snoop_access(&rx, &buf);
++
+     if (ignore_net_msg(rx.ctx.addr, rx.ctx.recv_dst)) {
+         return;
+     }

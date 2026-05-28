@@ -48,6 +48,29 @@ uint8_t *amaran_telink_hsi(uint16_t hue_deg, uint8_t saturation_0_100,
  * over every fixture. */
 uint8_t *amaran_telink_status_request(uint8_t out[10]);
 
+/* Decoded fixture status, parsed from a 0x26 status reply payload.
+ * Reverse-engineered from live replies (and cross-checked against Aaron's
+ * decodePacket): the fixture reports its *current mode* in command_type —
+ * 0x02 = CCT, 0x01 = HSI/color — using the same bit-packing as the
+ * corresponding setter. command_type 0x0a is a constant diagnostic page
+ * (what the desktop polls) and is not decoded. */
+typedef struct {
+    bool valid;            /* false: checksum bad or command_type not state */
+    bool on;               /* power: (low64 >> 8) & 1 */
+    bool is_hs;            /* true: HSI/color (0x01); false: CCT (0x02) */
+    uint16_t intensity;    /* 0..1000 (both modes) */
+    uint16_t cct_kelvin;   /* CCT mode */
+    int gm;                /* -10..+10, 0 neutral (CCT mode) */
+    uint16_t hue;          /* 0..360 (HSI mode) */
+    uint8_t sat;           /* 0..100 (HSI mode) */
+    uint8_t command_type;  /* raw command_type (p[9] & 0x7f), for logging */
+} amaran_status_t;
+
+/* Decode the 10-byte Telink payload (p[0]=checksum .. p[9]=command_type).
+ * Returns true and fills out only for decodable state replies (0x01/0x02
+ * with a valid checksum); false otherwise. */
+bool amaran_telink_decode_status(const uint8_t p[10], amaran_status_t *out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -4,6 +4,7 @@ sdkconfig
 sdkconfig.old
 dependencies.lock
 managed_components/
+.cache/
 
 # Generated, key-bearing: do NOT commit.
 main/mesh_config.h

@@ -133,35 +133,60 @@ The serial monitor doubles as a control surface for debugging:
 > help
 ```
 
-## Two-way sync (known limitation)
+## Two-way sync
 
-State flows **HA / curl / UART → lights** perfectly. The reverse —
-changes made *from the desktop or iOS app* showing up in Home Assistant —
-does **not** work, and is the one open item.
+State flows **both ways**: HA / curl / UART → lights, *and* changes made
+from the **desktop / iOS app or a physical knob** now show up in Home
+Assistant.
 
-What works:
-- The ESP32 publishes optimistic state to MQTT on every command, so HA's
-  own UI always reflects what HA (or curl/UART) did.
-- After any command, and every 12 s on a poll, the ESP32 sends a Telink
-  status-request (`cmd_type=0x0e`). Fixtures reply, and those replies
-  propagate through the mesh — which is what makes the **desktop app**
-  re-sync live and lets the **iOS app** show correct state on
-  pull-to-refresh.
+Outbound (HA → lights):
+- The ESP32 publishes state to MQTT on every command, and after any
+  command + every 12 s it sends a Telink status-request (`cmd_type=0x0e`).
+  Fixtures reply, and those replies propagate through the mesh — which is
+  what makes the **desktop app** re-sync live and lets the **iOS app**
+  show correct state on pull-to-refresh.
 
-What doesn't, and why:
-- For HA to reflect an external change, the ESP32 must *read* those
-  status replies. They come back as a **1-byte `0x26` opcode**. Per the
-  BLE Mesh spec, 1-byte opcodes belong to SIG models, so ESP-IDF's mesh
-  stack never delivers them to our vendor model's receive callback — the
-  bytes hit the radio but are dropped before our code sees them.
-  Confirmed empirically: poll requests send fine, zero replies are
-  received by the node.
-- Cracking it needs raw mesh network-PDU capture + decryption with the
-  NetKey (we already have that crypto in `telink.c`/the TS controller),
-  bypassing the model layer. That's the next experiment — not yet built.
+Inbound (lights → HA) — the status snoop:
+- The catch is that Telink fixtures route every `0x26` status reply to the
+  **provisioner unicast `0x0001`**, never to whoever requested status.
+  Our node (`0x0010`) network-decrypts the reply (we have the NetKey) but
+  the mesh stack drops it before the access layer: `trans_unseg()` bails on
+  any non-local message, and the model dispatch requires the destination to
+  be one of our own element addresses. So no amount of model registration
+  can catch it. (The earlier "1-byte `0x26` opcode" theory was a red
+  herring — the opcode is fine; the *destination address* is the problem.)
+- The fix is a small **patch to the ESP-IDF BLE Mesh core** (see
+  [`patches/`](patches/)). It adds a passive snoop in `bt_mesh_net_recv`
+  that decrypts a *copy* of the access payload with the studio AppKey and
+  hands the plaintext to the firmware via the weak hook
+  `amaran_mesh_access_rx()` (implemented in `main.c`). The relay path is
+  untouched, so desktop/iOS re-sync still works.
+- `amaran_telink_decode_status()` (`telink.c`) decodes the reply. The
+  fixture reports its **current mode** in `command_type`: `0x02` = CCT
+  (kelvin, intensity, G/M), `0x01` = HSI/color (hue, sat, intensity), with
+  power in `(low64 >> 8) & 1`. `command_type 0x0a` is a constant diagnostic
+  page the desktop polls and is ignored. The CCT layout matches Aaron's
+  `decodePacket`; HSI uses the same bit-packing as the HSI setter (both
+  confirmed against live replies).
+- `amaran_mqtt_report_state()` (`mqtt.c`) updates HA **only when a reading
+  differs materially** from what we last commanded, so the echo of our own
+  commands doesn't churn HA while genuine external changes propagate.
 
-So today this is a great **control** bridge; it is not yet a **state
-feedback** bridge for changes originating outside HA.
+> **Important:** the inbound path requires the `patches/` patch applied to
+> your ESP-IDF checkout. Without it, the firmware still builds and the
+> outbound direction works, but HA won't reflect external changes (the weak
+> hook is never called).
+
+### Debugging the snoop
+
+`scripts/` has helpers used to reverse-engineer and verify the reply
+format (set `CONFIG_BLE_MESH_STACK_TRACE_LEVEL=3` to see the raw decrypted
+PDUs logged by the patch):
+- `probe_state.py "<repl command>"` — send a command, print the resulting
+  decoded status replies per fixture.
+- `mqtt_watch.py [secs]` — dependency-free MQTT subscriber that dumps the
+  retained `amaran/.../state` topics to confirm what reached the broker.
+- `capture_refresh.py [secs]` — trigger a refresh and dump raw serial.
 
 ## Layout
 
@@ -170,8 +195,12 @@ esp32-firmware/
 ├── CMakeLists.txt
 ├── sdkconfig.defaults          Bluedroid + BLE Mesh + Wi-Fi + HTTP + MQTT, 4 MB flash
 ├── partitions.csv              3 MB factory app partition
+├── patches/                   ESP-IDF core patch for the inbound status snoop (required)
 ├── scripts/
-│   └── generate_config.py      reads amaran.db + app fixture_config.json → main/mesh_config.h
+│   ├── generate_config.py      reads amaran.db + app fixture_config.json → main/mesh_config.h
+│   ├── probe_state.py          send a REPL command, print decoded status replies
+│   ├── mqtt_watch.py           dependency-free MQTT subscriber for amaran/.../state
+│   └── capture_refresh.py      trigger a refresh, dump raw serial
 └── main/
     ├── main.c                  app_main, mesh self-provision, dispatch, UART REPL, poll
     ├── mesh_config.h           generated; KEY-BEARING; .gitignore'd
