@@ -1,0 +1,41 @@
+/*
+ * Wi-Fi + MQTT credentials. Copy this file to wifi_config.h and fill in
+ * the values for your network. wifi_config.h is in .gitignore — do not
+ * commit it.
+ */
+
+#ifndef AMARAN_WIFI_CONFIG_H
+#define AMARAN_WIFI_CONFIG_H
+
+/* Wi-Fi STA credentials. */
+#define WIFI_SSID       "your-ssid"
+#define WIFI_PASSWORD   "your-wifi-password"
+
+/* MQTT broker. Common values:
+ *   - Home Assistant's Mosquitto add-on on the same LAN:
+ *       MQTT_URI = "mqtt://<homeassistant-host>:1883"
+ *   - External broker:
+ *       MQTT_URI = "mqtt://192.168.1.10:1883"
+ *
+ * Leave MQTT_USERNAME / MQTT_PASSWORD as empty strings ("") for
+ * anonymous broker access. */
+#define MQTT_URI        "mqtt://homeassistant.local:1883"
+#define MQTT_USERNAME   ""
+#define MQTT_PASSWORD   ""
+
+/* Home Assistant MQTT discovery prefix. Leave as "homeassistant" unless
+ * you've changed it in HA's MQTT integration settings. */
+#define HA_DISCOVERY_PREFIX "homeassistant"
+
+/* MQTT topic prefix for command and state topics. Each fixture gets its
+ * own subtopic: <prefix>/<fixture-key>/set, <prefix>/<fixture-key>/state. */
+#define MQTT_TOPIC_PREFIX   "amaran"
+
+/* Unique device identifier used in HA discovery payloads. Change if you
+ * run more than one of these ESP32 nodes on the same MQTT broker. */
+#define DEVICE_ID           "amaran-esp32"
+
+/* HTTP REST API port. Default 80. */
+#define HTTP_PORT           80
+
+#endif /* AMARAN_WIFI_CONFIG_H */
