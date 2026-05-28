@@ -1,8 +1,14 @@
 # Amaran Light Direct BLE Control — Research Findings
 
 > **Status: WORKING** — No desktop app required.  
-> Primary solution: `src/mesh-controller.ts` (pure TypeScript)  
-> Fallback: `src/pymesh-controller.py` (Python SDK wrapper)
+> Solution: `src/mesh-controller.ts` (pure TypeScript).
+>
+> **Historical note:** the original proof-of-concept rode on the amaran
+> Desktop app's `PyMeshSDK.so` (the "Approach 2" below). That Python
+> fallback (`src/pymesh-controller.py` + `vendor/PyMeshSDK/`) has been
+> **retired** — its hard-won findings are baked into `mesh-controller.ts`
+> and the ESP32 firmware's `telink.c`. The PyMeshSDK sections are kept
+> below as a research record, not as current instructions.
 
 ---
 
@@ -10,13 +16,11 @@
 
 ```bash
 # Quit the Amaran Desktop app first, then:
-/opt/homebrew/bin/python3.11 src/pymesh-controller.py on
-/opt/homebrew/bin/python3.11 src/pymesh-controller.py off
-/opt/homebrew/bin/python3.11 src/pymesh-controller.py brightness 75
-/opt/homebrew/bin/python3.11 src/pymesh-controller.py cct 80 5600
+npm run mesh:on
+npm run mesh:off
+npm run mesh:brightness 75
+npm run mesh:cct 80 5600
 ```
-
-Or via npm scripts: `npm run py:on`, `npm run py:off`
 
 ---
 
@@ -194,11 +198,14 @@ From `~/Library/Application Support/amaran Desktop/*/amaran.db`:
 
 ```
 src/
-  mesh-controller.ts     ← Primary solution (pure TypeScript, no Python required)
-  pymesh-controller.py   ← Fallback solution (Python + PyMeshSDK.so)
-vendor/
-  PyMeshSDK/PyMeshSDK.so ← Telink SigMeshLib Python extension (copied from app)
+  mesh-controller.ts     ← Solution (pure TypeScript, no Python required)
 ```
+
+> The `src/pymesh-controller.py` + `vendor/PyMeshSDK/PyMeshSDK.so` fallback
+> referenced throughout this document has been removed (see the note at the
+> top). The PyMeshSDK extension can still be copied from the app bundle at
+> `/Applications/amaran Desktop.app/Contents/MacOS/PyMeshSDK/PyMeshSDK.so`
+> if you ever need to reproduce the original research.
 
 ### Telink Proprietary Opcode (discovered May 2026)
 
@@ -222,10 +229,3 @@ Payload format: `[checksum, 0×7, cmd_value, cmd_type]`
 - Node.js 18+ with `npm install`
 - Amaran Desktop app **not running** (would hold the BLE connection)
 - macOS with Bluetooth permission granted to Terminal/iTerm
-
-### Python (pymesh-controller.py)
-- Homebrew Python 3.11: `/opt/homebrew/bin/python3.11`
-- `vendor/PyMeshSDK/PyMeshSDK.so` (copied from the app bundle)
-- Amaran Desktop app **not running**
-
-The script automatically deletes `~/Documents/TelinkSDKMeshJsonData` before each run to force fresh initialization from the hard-coded mesh configuration.

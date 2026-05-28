@@ -72,7 +72,6 @@ Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, 
 | `mesh:brightness <n>`      | Set brightness 0-100                                 |
 | `mesh:cct <b> <k> [gm]`    | CCT: brightness 0-100, kelvin 2500-7500, GM -50..+50 |
 | `mesh:hsi <b> <h> <s>`     | HSI: brightness, hue 0-360°, saturation 0-100        |
-| `py:on/off/brightness/cct` | Python SDK fallback (slower, more reliable)          |
 | `scan`                     | Scan for BLE devices                                 |
 | `discover <addr>`          | Inspect a device's services                          |
 
@@ -86,7 +85,8 @@ commands via `/tmp/amaran-light.sock`. Start with `npm run daemon:start`.
 
 **`src/mesh-controller.ts`** — full BLE Mesh stack (crypto, proxy protocol,
 command encoding). All physical controls use **Telink proprietary opcode `0x26`**,
-reverse-engineered from `vendor/PyMeshSDK/PyMeshSDK.so`.
+originally reverse-engineered from the amaran Desktop app's PyMeshSDK and now
+implemented natively here (and in the ESP32 firmware's `telink.c`).
 
 **`src/setup.ts`** — reads `amaran.db` to extract mesh keys and light addresses,
 writes `lights.json`.
@@ -221,6 +221,5 @@ rest_command:
 
 - Node.js 18+
 - macOS (CoreBluetooth via `@abandonware/noble`)
-- Thee are also python versions of these scripts which rely on Python 3.11 for `py:*` fallback scripts: `brew install python@3.11`. You probably dont need this, in fact we could probably just rewrite the python one like we did with the typescript version.
 - Amaran Desktop app **closed** when running (it holds the BLE connection)
 - Bluetooth permission granted to Terminal / iTerm

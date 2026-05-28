@@ -18,10 +18,6 @@
     "mesh:hsi": "tsx src/cli.ts hsi",
     "scan": "tsx src/ble-scanner.ts scan",
     "discover": "tsx src/ble-scanner.ts connect",
-    "py:on": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py on",
-    "py:off": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py off",
-    "py:brightness": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py brightness",
-    "py:cct": "/opt/homebrew/bin/python3.11 src/pymesh-controller.py cct",
     "build": "tsc"
   },
   "keywords": [
