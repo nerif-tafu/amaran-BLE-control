@@ -12,3 +12,4 @@ lights.json
 # If you want to exclude it: uncomment the next line
 # vendor/PyMeshSDK/PyMeshSDK.so
 *.xapk
+amaran/
