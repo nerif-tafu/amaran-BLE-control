@@ -100,10 +100,14 @@ npm run autostart:install
 Registers a Scheduled Task that starts the daemon 30 seconds after you log in,
 with no console window and the working directory set to this repo.
 
-Nothing appears on screen: the launcher runs under `-WindowStyle Hidden`, so
-the only window in the whole process tree is a minimized `WS_EX_TOOLWINDOW`
-placeholder that is excluded from both the taskbar and Alt+Tab. The `node`
-processes have no windows at all.
+Nothing appears on screen. `powershell -WindowStyle Hidden` is not enough on
+its own: when Windows Terminal is the default terminal application, conhost
+hands the console off to a separate `WindowsTerminal.exe` process, and
+PowerShell cannot hide a window it does not own — a black terminal then sits
+on screen for as long as the daemon runs. The task therefore launches the
+whole thing under `conhost --headless`, which opts out of that handoff. The
+only windows left in the process tree are an invisible 16x16
+`PseudoConsoleWindow` and a 0x0 `IME` window; the `node` processes have none.
 
 Recovery is layered, because a light that is off or out of range at boot is
 the normal case:

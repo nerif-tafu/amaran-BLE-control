@@ -27,6 +27,13 @@ const PS_HOST = path.join(
   process.env.SystemRoot ?? "C:/Windows",
   "System32", "WindowsPowerShell", "v1.0", "powershell.exe",
 );
+const PS_HOST_NAME = `"${PS_HOST}"`;
+
+// Console host, used to run the launcher windowless. See the note in install().
+const CONHOST = path.join(
+  process.env.SystemRoot ?? "C:/Windows",
+  "System32", "conhost.exe",
+);
 
 function die(msg: string): never {
   console.error(msg);
@@ -60,7 +67,15 @@ function install(): void {
   if (!fs.existsSync(path.join(REPO_ROOT, "lights.json"))) {
     die("lights.json not found. Run `npm run setup` first — the daemon needs it at startup.");
   }
+  // `powershell -WindowStyle Hidden` is NOT enough on Windows 11. When Windows
+  // Terminal is the default terminal application, conhost hands the console off
+  // to a separate WindowsTerminal.exe process, and PowerShell cannot hide a
+  // window it does not own -- a black terminal sits on screen for as long as the
+  // daemon runs. Launching under `conhost --headless` opts out of that handoff
+  // and gives the process a console with no window at all.
   const args = [
+    "--headless",
+    PS_HOST_NAME,
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
     "-File", `"${LAUNCHER}"`, "-Node", `"${process.execPath}"`,
   ].join(" ");
@@ -69,7 +84,7 @@ function install(): void {
 $ErrorActionPreference = 'Stop'
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 
-$action = New-ScheduledTaskAction -Execute ${ps(PS_HOST)} -Argument ${ps(args)} -WorkingDirectory ${ps(REPO_ROOT)}
+$action = New-ScheduledTaskAction -Execute ${ps(CONHOST)} -Argument ${ps(args)} -WorkingDirectory ${ps(REPO_ROOT)}
 
 # A short delay lets the Bluetooth stack finish coming up before the daemon scans.
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
