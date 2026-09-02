@@ -100,12 +100,23 @@ npm run autostart:install
 Registers a Scheduled Task that starts the daemon 30 seconds after you log in,
 with no console window and the working directory set to this repo.
 
-The task runs [`scripts/win-daemon-launch.ps1`](scripts/win-daemon-launch.ps1),
-which supervises the daemon rather than just launching it: if the daemon exits
-non-zero — the usual case when the light is powered off or out of range at
-boot — it is restarted every 60 seconds until it comes up. A clean exit (from
-`amaran stop`) ends the loop, so stopping the daemon keeps it stopped.
-Task Scheduler's own restart-on-failure setting does not cover this: it fires
+Nothing appears on screen: the launcher runs under `-WindowStyle Hidden`, so
+the only window in the whole process tree is a minimized `WS_EX_TOOLWINDOW`
+placeholder that is excluded from both the taskbar and Alt+Tab. The `node`
+processes have no windows at all.
+
+Recovery is layered, because a light that is off or out of range at boot is
+the normal case:
+
+1. Each BLE step (connect, service discovery, notify subscribe) is bounded by
+   a timeout, so a stalled link fails the attempt instead of hanging forever.
+2. The daemon retries connecting in-process every 15 seconds, indefinitely.
+3. [`scripts/win-daemon-launch.ps1`](scripts/win-daemon-launch.ps1) supervises
+   the process and relaunches it after 60 seconds if it exits non-zero — the
+   backstop for a hard crash. A clean exit (from `amaran stop`) ends the loop,
+   so stopping the daemon keeps it stopped.
+
+Task Scheduler's own restart-on-failure setting covers none of this: it fires
 when a task ends unexpectedly, not when its action returns a non-zero code.
 
 ```bash

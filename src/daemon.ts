@@ -26,8 +26,11 @@ async function runDaemon() {
   const ctrl = new MeshController(config);
 
   // ── Connect ─────────────────────────────────────────────────────────────────
+  // Retry in-process rather than exiting: a light that is switched off at boot
+  // should be picked up whenever it appears, and each attempt is bounded by
+  // the BLE step timeouts so a stalled connect cannot wedge the daemon.
   console.log("Connecting to lights...");
-  if (!(await ctrl.connect())) {
+  if (!(await ctrl.connectWithRetry({ attempts: 0, delayMs: 15000 }))) {
     console.error("Failed to connect. Is the Amaran Desktop app closed?");
     process.exit(1);
   }

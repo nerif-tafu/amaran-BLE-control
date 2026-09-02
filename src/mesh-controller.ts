@@ -21,6 +21,30 @@ const GROUP_ALL = 0xc000;
 
 // ─── BLE UUIDs ───────────────────────────────────────────────────────────────
 
+// Every BLE step below can stall indefinitely on a flaky link -- noble's
+// WinRT backend in particular has been seen to hang in connectAsync with no
+// error and no timeout of its own. Bound each step so a stall surfaces as a
+// failed attempt the caller can retry, rather than wedging the daemon.
+const BLE_CONNECT_TIMEOUT_MS = 15000;
+const BLE_DISCOVER_TIMEOUT_MS = 20000;
+const BLE_SUBSCRIBE_TIMEOUT_MS = 10000;
+const BLE_DISCONNECT_TIMEOUT_MS = 5000;
+
+class TimeoutError extends Error {}
+
+function withTimeout<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new TimeoutError(`${what} timed out after ${ms}ms`)),
+      ms,
+    );
+    work.then(
+      value => { clearTimeout(timer); resolve(value); },
+      err => { clearTimeout(timer); reject(err); },
+    );
+  });
+}
+
 const PROXY_SERVICE = "1828";
 const PROXY_DATA_IN = "2add"; // write mesh messages here
 const PROXY_DATA_OUT = "2ade"; // notifications come from here
@@ -367,13 +391,33 @@ export class MeshController {
       const knownMacs = self.lights.map(l => l.mac.toLowerCase().replace(/-/g, ":"));
       console.log(`Scanning for lights (relay hub MAC: ${hubMac})...`);
       let found = false;
+      let settled = false;
       const candidates = new Map<string, any>(); // normalized-addr → peripheral
 
-      noble.on("stateChange", async (state: string) => {
-        if (state === "poweredOn") await noble.startScanningAsync([], true);
-      });
+      let pickWindowClosed = false;
+      let hubWait: ReturnType<typeof setTimeout> | undefined;
+      let giveUp: ReturnType<typeof setTimeout> | undefined;
 
-      noble.on("discover", async (p: any) => {
+      // connect() is called repeatedly by connectWithRetry, so everything it
+      // installs has to come back off before it settles — otherwise each
+      // attempt stacks another listener on the shared noble singleton and the
+      // handlers fire once per past attempt.
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(hubWait);
+        clearTimeout(giveUp);
+        noble.removeListener("stateChange", onStateChange);
+        noble.removeListener("discover", onDiscover);
+        Promise.resolve(noble.stopScanningAsync()).catch(() => {});
+        resolve(ok);
+      };
+
+      const onStateChange = async (state: string) => {
+        if (state === "poweredOn") await noble.startScanningAsync([], true);
+      };
+
+      const onDiscover = async (p: any) => {
         if (found) return;
 
         const addr = (p.address || p.id || "").toLowerCase().replace(/-/g, ":");
@@ -394,10 +438,24 @@ export class MeshController {
 
         if (isHub) {
           found = true;
-          noble.stopScanningAsync();
-          doConnect(p, addr).then(resolve);
+          await Promise.resolve(noble.stopScanningAsync()).catch(() => {});
+          finish(await doConnect(p, addr));
+        } else if (pickWindowClosed) {
+          // Candidate turned up after the 5s picker already ran. Take it now
+          // rather than letting the attempt time out with a usable light in
+          // hand -- a light powering on mid-scan hits this every time.
+          await tryBest();
         }
-      });
+      };
+
+      noble.on("stateChange", onStateChange);
+      noble.on("discover", onDiscover);
+
+      // On a retry noble is already powered on, so no stateChange event will
+      // arrive to kick off the scan. startScanning is idempotent.
+      if ((noble as any).state === "poweredOn") {
+        Promise.resolve(noble.startScanningAsync([], true)).catch(() => {});
+      }
 
       // After 5s, pick best candidate.
       // Order: matches hubMac (only works if hub config is a BLE UUID on macOS,
@@ -408,10 +466,10 @@ export class MeshController {
         "b3ed1263a9304e5132b3edfbb4c71aec", // Key Light
         "d16927ee947b5a0ced73358c29bc4bcd", // Back Light
       ];
-      const hubWait = setTimeout(async () => {
+      async function tryBest(): Promise<void> {
         if (found || candidates.size === 0) return;
         found = true;
-        await noble.stopScanningAsync();
+        await Promise.resolve(noble.stopScanningAsync()).catch(() => {});
         let best = candidates.get(hubMac);
         if (!best) {
           for (const uuid of preferredHubUUIDs) {
@@ -420,26 +478,34 @@ export class MeshController {
         }
         if (!best) best = candidates.values().next().value;
         const addr = (best.address || best.id || "").toLowerCase().replace(/-/g, ":");
-        doConnect(best, addr).then(resolve);
+        finish(await doConnect(best, addr));
+      }
+
+      hubWait = setTimeout(() => {
+        pickWindowClosed = true;
+        void tryBest();
       }, 5000);
 
-      setTimeout(async () => {
-        clearTimeout(hubWait);
+      giveUp = setTimeout(() => {
         if (!found) {
-          await noble.stopScanningAsync();
           console.error("No Amaran lights found. Make sure the Amaran Desktop app is closed.");
-          resolve(false);
+          finish(false);
         }
       }, 15000);
 
       async function doConnect(p: any, addr: string): Promise<boolean> {
-        console.log(`Connecting to ${p.advertisement.localName || addr} (${addr})...`);
+        const label = p.advertisement.localName || addr;
+        console.log(`Connecting to ${label} (${addr})...`);
         try {
-          await p.connectAsync();
+          await withTimeout(p.connectAsync(), BLE_CONNECT_TIMEOUT_MS, "BLE connect");
           self.peripheral = p;
 
-          const { characteristics } = await p.discoverSomeServicesAndCharacteristicsAsync(
-            [PROXY_SERVICE], [PROXY_DATA_IN, PROXY_DATA_OUT]
+          const { characteristics } = await withTimeout<{ characteristics: any[] }>(
+            p.discoverSomeServicesAndCharacteristicsAsync(
+              [PROXY_SERVICE], [PROXY_DATA_IN, PROXY_DATA_OUT]
+            ),
+            BLE_DISCOVER_TIMEOUT_MS,
+            "service discovery",
           );
 
           for (const c of characteristics) {
@@ -448,20 +514,64 @@ export class MeshController {
           }
 
           if (!self.dataIn || !self.dataOut) {
-            console.error(`Mesh proxy chars not found. Run: npx tsx src/ble-scanner.ts connect ${addr}`);
-            return false;
+            throw new Error(`Mesh proxy chars not found. Run: npx tsx src/ble-scanner.ts connect ${addr}`);
           }
 
           self.dataOut.on("data", (d: Buffer) => self.onNotify(d));
-          await self.dataOut.subscribeAsync();
-          console.log(`Connected to ${p.advertisement.localName || addr}`);
+          await withTimeout(self.dataOut.subscribeAsync(), BLE_SUBSCRIBE_TIMEOUT_MS, "notify subscribe");
+          console.log(`Connected to ${label}`);
           return true;
-        } catch (err) {
-          console.error("Connection error:", err);
+        } catch (err: any) {
+          const detail = err?.message ?? err;
+          if (err instanceof TimeoutError) {
+            console.error(`Connection stalled: ${detail}`);
+          } else {
+            console.error(`Connection error: ${detail}`);
+          }
+          // Leave nothing half-open, or the next attempt inherits it.
+          await self.teardown(p);
           return false;
         }
       }
     });
+  }
+
+  /** Drop all connection state so a later attempt starts clean. */
+  private async teardown(p?: any): Promise<void> {
+    const target = p ?? this.peripheral;
+    this.dataIn = null;
+    this.dataOut = null;
+    this.peripheral = null;
+    this.beaconReceived = false;
+    if (!target) return;
+    try {
+      target.removeAllListeners?.("data");
+      await withTimeout(target.disconnectAsync(), BLE_DISCONNECT_TIMEOUT_MS, "disconnect");
+    } catch {
+      // Already gone, or the stack is wedged — nothing more we can do here.
+    }
+  }
+
+  /**
+   * Connect, retrying after an attempt that fails or stalls.
+   *
+   * `attempts: 0` retries forever, which is what the daemon wants: a light
+   * switched off at boot should be picked up whenever it appears, without the
+   * process having to die and be restarted to try again.
+   */
+  async connectWithRetry(opts: {
+    attempts?: number;
+    delayMs?: number;
+    preferredMac?: string;
+  } = {}): Promise<boolean> {
+    const { attempts = 0, delayMs = 15000, preferredMac } = opts;
+    for (let n = 1; attempts <= 0 || n <= attempts; n++) {
+      if (await this.connect(preferredMac)) return true;
+      if (attempts > 0 && n >= attempts) break;
+      console.log(`Connect attempt ${n} failed; retrying in ${Math.round(delayMs / 1000)}s...`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+    return false;
   }
 
   private ivResolve: ((iv: number) => void) | null = null;
