@@ -11,13 +11,17 @@ import * as net from "net";
 import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
-import { SOCKET_PATH, PID_PATH } from "./daemon-paths.js";
+import { SOCKET_PATH, PID_PATH, isDaemonRunning, cleanupDaemonFiles } from "./daemon-paths.js";
 import { loadConfig, type LightConfig } from "./config.js";
 import { MeshController } from "./mesh-controller.js";
 
 export { SOCKET_PATH, PID_PATH } from "./daemon-paths.js";
 
 async function runDaemon() {
+  if (isDaemonRunning()) {
+    console.error("A daemon is already running. Stop it first: amaran stop");
+    process.exit(1);
+  }
   const config = loadConfig();
   const ctrl = new MeshController(config);
 
@@ -31,8 +35,8 @@ async function runDaemon() {
   await ctrl.setupProxyFilter();
   console.log("Ready. Listening on", SOCKET_PATH);
 
-  // ── Clean up stale socket ────────────────────────────────────────────────────
-  if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);
+  // ── Clean up after any previous run ──────────────────────────────────────────
+  cleanupDaemonFiles();
   fs.writeFileSync(PID_PATH, String(process.pid));
 
   // ── Optional MQTT state publisher ────────────────────────────────────────────
@@ -277,6 +281,11 @@ async function runDaemon() {
     socket.on("error", () => {});
   });
 
+  server.on("error", (e: NodeJS.ErrnoException) => {
+    console.error(`Could not listen on ${SOCKET_PATH}: ${e.message}`);
+    process.exit(1);
+  });
+
   server.listen(SOCKET_PATH, () => {
     console.log(`Daemon PID ${process.pid} running`);
   });
@@ -360,10 +369,7 @@ async function runDaemon() {
     console.log(`HTTP API → http://${httpCfg.host === "0.0.0.0" ? "localhost" : httpCfg.host}:${httpCfg.port}`);
   });
 
-  function cleanup() {
-    if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);
-    if (fs.existsSync(PID_PATH)) fs.unlinkSync(PID_PATH);
-  }
+  const cleanup = cleanupDaemonFiles;
 
   const shutdown = async () => {
     mqttShutdown?.();

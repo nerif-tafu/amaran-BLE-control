@@ -29,8 +29,12 @@ npm run daemon:stop
 
 ## Setup
 
-`npm run setup` reads `~/Library/Application Support/amaran Desktop/*/amaran.db`
-and writes a `lights.json` config file. Run it once after installing.
+`npm run setup` finds the amaran Desktop app's database and writes a
+`lights.json` config file. Run it once after installing. It looks in:
+
+- macOS: `~/Library/Application Support/amaran Desktop/*/amaran.db`
+- Windows: `%APPDATA%\amaran Desktop\*\amaran.db` (also `%LOCALAPPDATA%`)
+- Linux: `~/.config/amaran Desktop/*/amaran.db`
 
 If the Amaran app isn't installed, run setup and enter your mesh keys manually.
 
@@ -67,6 +71,10 @@ Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, 
 | `setup`                  | Run setup wizard (one time)                                |
 | `daemon:start`           | Start daemon (also serves HTTP + MQTT if configured)       |
 | `daemon:stop`            | Stop daemon                                                |
+| `autostart:install`      | Windows: start the daemon at logon (Scheduled Task)        |
+| `autostart:uninstall`    | Windows: remove the logon task                             |
+| `autostart:status`       | Windows: task state, last run time and exit code           |
+| `autostart:start`        | Windows: run the logon task now, without rebooting         |
 | `mesh:on`                | Turn all lights on                                         |
 | `mesh:off`               | Turn all lights off                                        |
 | `mesh:brightness <n>`    | Set brightness 0-100                                       |
@@ -82,6 +90,37 @@ Or use the npm shortcuts: `mesh:on`, `mesh:off`, `mesh:brightness`, `mesh:cct`, 
 After any command, the controller now also sends a Telink status-request so
 fixtures broadcast their new state immediately — the ESP32 bridge and the
 desktop app pick up the change right away instead of on the next poll.
+
+## Running at Boot (Windows)
+
+```bash
+npm run autostart:install
+```
+
+Registers a Scheduled Task that starts the daemon 30 seconds after you log in,
+with no console window and the working directory set to this repo.
+
+The task runs [`scripts/win-daemon-launch.ps1`](scripts/win-daemon-launch.ps1),
+which supervises the daemon rather than just launching it: if the daemon exits
+non-zero — the usual case when the light is powered off or out of range at
+boot — it is restarted every 60 seconds until it comes up. A clean exit (from
+`amaran stop`) ends the loop, so stopping the daemon keeps it stopped.
+Task Scheduler's own restart-on-failure setting does not cover this: it fires
+when a task ends unexpectedly, not when its action returns a non-zero code.
+
+```bash
+npm run autostart:status
+```
+
+shows the task state and the last exit code; `npm run autostart:uninstall`
+removes it. Boot-time output goes to `%TEMP%\amaran-light.log`.
+
+It has to be a logon task rather than a Windows service: noble talks to the
+Bluetooth adapter through WinRT, which is not available to session-0 services.
+That also means the daemon only runs while you are logged in.
+
+On macOS and Linux the same job needs a launchd agent or a `systemd --user`
+unit; `autostart:install` refuses to run there rather than pretending.
 
 ## How It Works
 

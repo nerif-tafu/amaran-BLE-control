@@ -12,15 +12,29 @@
  */
 import { execFileSync } from "child_process";
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { amaranDataDirs } from "../src/config.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..");
 
-const DB_GLOB_DIR = path.join(os.homedir(), "Library", "Application Support", "amaran Desktop");
-const FIXTURE_CONFIG_GLOB_DIRS = "/Applications";
+// Roots the amaran Desktop app itself is installed under, per platform. Its
+// fixture_config.json lives at a different depth in each bundle layout.
+function appInstallCandidates(): { root: string; rel: string[] }[] {
+  if (process.platform === "win32") {
+    const roots = [
+      process.env["ProgramFiles"],
+      process.env["ProgramFiles(x86)"],
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Programs") : undefined,
+    ].filter((r): r is string => !!r);
+    return roots.map(root => ({ root, rel: ["resources", "config", "fixture_config.json"] }));
+  }
+  if (process.platform === "darwin") {
+    return [{ root: "/Applications", rel: ["Contents", "Resources", "config", "fixture_config.json"] }];
+  }
+  return [{ root: "/opt", rel: ["resources", "config", "fixture_config.json"] }];
+}
 
 // Per-fixture capabilities come from the app's fixture_config.json, keyed by
 // `fixture_<code>_<hwver>`. Some newer fixtures (e.g. Halo 100x / 401C5) are
@@ -53,15 +67,23 @@ function findDB(explicit?: string): string {
     if (!fs.existsSync(explicit)) die(`DB not found: ${explicit}`);
     return explicit;
   }
-  if (!fs.existsSync(DB_GLOB_DIR)) {
-    die(`Could not locate amaran.db. Pass --db /path/to/amaran.db.\nTried under: ${DB_GLOB_DIR}`);
+  const bases = amaranDataDirs();
+  const candidates: string[] = [];
+  for (const base of bases) {
+    if (!fs.existsSync(base)) continue;
+    try {
+      // Each account lives in its own subdirectory, e.g. "80374038_secure_id/amaran.db"
+      for (const d of fs.readdirSync(base)) candidates.push(path.join(base, d, "amaran.db"));
+    } catch { /* unreadable directory */ }
+    candidates.push(path.join(base, "amaran.db"));
   }
-  const hits = fs.readdirSync(DB_GLOB_DIR)
-    .map(d => path.join(DB_GLOB_DIR, d, "amaran.db"))
+  const hits = candidates
     .filter(p => fs.existsSync(p))
     .map(p => ({ p, m: fs.statSync(p).mtimeMs }))
     .sort((a, b) => b.m - a.m);
-  if (!hits.length) die(`No amaran.db under ${DB_GLOB_DIR}. Pass --db.`);
+  if (!hits.length) {
+    die(`Could not locate amaran.db. Pass --db /path/to/amaran.db.\nTried under:\n  ${bases.join("\n  ")}`);
+  }
   return hits[0].p;
 }
 
@@ -73,13 +95,20 @@ function sqliteJson(db: string, sql: string): any[] {
 function findFixtureConfig(explicit?: string): string | null {
   const candidates: string[] = [];
   if (explicit) candidates.push(explicit);
-  try {
-    for (const app of fs.readdirSync(FIXTURE_CONFIG_GLOB_DIRS)) {
-      if (!/maran/i.test(app)) continue;
-      const p = path.join(FIXTURE_CONFIG_GLOB_DIRS, app, "Contents", "Resources", "config", "fixture_config.json");
-      if (fs.existsSync(p)) candidates.push(p);
-    }
-  } catch { /* /Applications unreadable */ }
+  // The app copies its fixture table next to the per-account data.
+  for (const base of amaranDataDirs()) {
+    candidates.push(path.join(base, "config", "fixture_config.json"));
+  }
+  // Otherwise read it out of the installed app bundle.
+  for (const { root, rel } of appInstallCandidates()) {
+    try {
+      for (const app of fs.readdirSync(root)) {
+        if (!/maran/i.test(app)) continue;
+        const p = path.join(root, app, ...rel);
+        if (fs.existsSync(p)) candidates.push(p);
+      }
+    } catch { /* install root unreadable */ }
+  }
   candidates.sort((a, b) => (fs.existsSync(b) ? fs.statSync(b).mtimeMs : 0) - (fs.existsSync(a) ? fs.statSync(a).mtimeMs : 0));
   return candidates.find(p => fs.existsSync(p)) ?? null;
 }

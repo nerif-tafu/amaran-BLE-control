@@ -22,20 +22,19 @@ import * as net from "net";
 import * as fs from "fs";
 import * as readline from "readline";
 import { spawn } from "child_process";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { loadConfig, configExists } from "./config.js";
-import { SOCKET_PATH, PID_PATH } from "./daemon-paths.js";
+import { loadConfig, configExists, type LightConfig } from "./config.js";
+import {
+  SOCKET_PATH,
+  LOG_PATH,
+  REPO_ROOT,
+  daemonCommand,
+  isDaemonRunning,
+  cleanupDaemonFiles,
+} from "./daemon-paths.js";
 // MeshController and daemon are imported dynamically to avoid noble initialization
 // interfering with the socket event loop when using the daemon.
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
 // ── Daemon client ─────────────────────────────────────────────────────────────
-
-function isDaemonRunning(): boolean {
-  return fs.existsSync(SOCKET_PATH);
-}
 
 function sendToDaemon(req: object): Promise<{ ok: boolean; result?: string; error?: string }> {
   return new Promise((resolve, reject) => {
@@ -109,13 +108,13 @@ async function runCommandOnController(
 ): Promise<void> {
   const targets: number[] = (() => {
     if (!lightKey || lightKey === "all") return [0xffff];
-    const l = ctrl.lights.find(l => l.key === lightKey);
-    if (!l) throw new Error(`Unknown light: "${lightKey}". Known: ${ctrl.lights.map(l => l.key).join(", ")}`);
+    const l = ctrl.lights.find((l: LightConfig) => l.key === lightKey);
+    if (!l) throw new Error(`Unknown light: "${lightKey}". Known: ${ctrl.lights.map((l: LightConfig) => l.key).join(", ")}`);
     return [l.address];
   })();
 
   for (const addr of targets) {
-    const name = ctrl.lights.find(l => l.address === addr)?.name ?? (addr === 0xffff ? "all" : `0x${addr.toString(16)}`);
+    const name = ctrl.lights.find((l: LightConfig) => l.address === addr)?.name ?? (addr === 0xffff ? "all" : `0x${addr.toString(16)}`);
     switch (cmd) {
       case "on":
         console.log(`Turning ${name} ON`);
@@ -230,13 +229,19 @@ function startDaemon(): void {
     console.log("Daemon already running. Stop it first: amaran stop");
     return;
   }
-  const daemonScript = path.join(__dirname, "daemon.ts");
-  const child = spawn("npx", ["tsx", daemonScript], {
+  const { command, args } = daemonCommand();
+  // Detached with output to a log file rather than inherited: on Windows an
+  // inherited stdio handle dies with the parent console window.
+  const log = fs.openSync(LOG_PATH, "a");
+  const child = spawn(command, args, {
+    cwd: REPO_ROOT,
     detached: true,
-    stdio: "inherit",
+    stdio: ["ignore", log, log],
+    windowsHide: true,
   });
   child.unref();
   console.log(`Daemon starting (PID: ${child.pid})...`);
+  console.log(`Log: ${LOG_PATH}`);
   console.log("Run 'amaran stop' to stop it.");
 }
 
@@ -250,8 +255,7 @@ async function stopDaemon(): Promise<void> {
     if (res.ok) console.log("Daemon stopped.");
   } catch {
     // Daemon may have exited already
-    if (fs.existsSync(SOCKET_PATH)) fs.unlinkSync(SOCKET_PATH);
-    if (fs.existsSync(PID_PATH)) fs.unlinkSync(PID_PATH);
+    cleanupDaemonFiles();
     console.log("Daemon stopped.");
   }
 }
@@ -275,7 +279,8 @@ async function main() {
 
   // Meta commands
   if (firstArg === "setup") {
-    const { default: setupMain } = await import("./setup.js");
+    // setup.ts runs its wizard on import.
+    await import("./setup.js");
     return;
   }
 

@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 
 export interface LightConfig {
   key: string;     // short name used as CLI target (e.g. "key", "back", "halo")
@@ -56,18 +57,40 @@ export function configExists(): boolean {
   return fs.existsSync(CONFIG_PATH);
 }
 
-export function findAmaranDB(): string | null {
-  const base = path.join(
-    process.env.HOME ?? "",
-    "Library", "Application Support", "amaran Desktop"
-  );
-  if (!fs.existsSync(base)) return null;
-  try {
-    const hits = fs.readdirSync(base)
-      .map(d => path.join(base, d, "amaran.db"))
-      .filter(p => fs.existsSync(p));
-    return hits[0] ?? null;
-  } catch {
-    return null;
+/** Directories the amaran Desktop app stores its per-account data in, per platform. */
+export function amaranDataDirs(): string[] {
+  const home = os.homedir();
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA ?? path.join(home, "AppData", "Roaming");
+    const localAppData = process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local");
+    return [
+      path.join(appData, "amaran Desktop"),
+      path.join(localAppData, "amaran Desktop"),
+    ];
   }
+  if (process.platform === "darwin") {
+    return [path.join(home, "Library", "Application Support", "amaran Desktop")];
+  }
+  return [
+    path.join(process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"), "amaran Desktop"),
+  ];
+}
+
+export function findAmaranDB(): string | null {
+  for (const base of amaranDataDirs()) {
+    if (!fs.existsSync(base)) continue;
+    try {
+      // Each account lives in its own subdirectory, e.g. "80374038_secure_id/amaran.db"
+      const hit = fs.readdirSync(base)
+        .map(d => path.join(base, d, "amaran.db"))
+        .find(p => fs.existsSync(p));
+      if (hit) return hit;
+      // Older installs put the DB straight in the data directory.
+      const flat = path.join(base, "amaran.db");
+      if (fs.existsSync(flat)) return flat;
+    } catch {
+      // unreadable directory — try the next candidate
+    }
+  }
+  return null;
 }

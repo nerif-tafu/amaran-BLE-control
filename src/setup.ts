@@ -9,8 +9,9 @@
  */
 
 import * as readline from "readline";
+import * as path from "path";
 import { execSync } from "child_process";
-import { findAmaranDB, saveConfig, type Config, type LightConfig } from "./config.js";
+import { amaranDataDirs, findAmaranDB, saveConfig, type Config, type LightConfig } from "./config.js";
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const ask = (q: string): Promise<string> =>
@@ -55,7 +56,9 @@ async function pickRelayHub(lights: LightConfig[]): Promise<string> {
 
 async function manualSetup(): Promise<Config> {
   console.log("\nManual setup — enter your mesh config values.");
-  console.log("(Find these in ~/Library/Application Support/amaran Desktop/*/amaran.db)\n");
+  console.log("(Find these in the amaran Desktop app's amaran.db, e.g.)");
+  amaranDataDirs().forEach(d => console.log(`  ${d}${path.sep}*${path.sep}amaran.db`));
+  console.log("");
 
   const netKey = (await ask("Net Key (hex, 32 chars): ")).toUpperCase();
   const appKey = (await ask("App Key (hex, 32 chars): ")).toUpperCase();
@@ -108,7 +111,8 @@ async function main() {
       }
     }
   } else {
-    console.log("Amaran Desktop database not found (is the app installed?).");
+    console.log("Amaran Desktop database not found (is the app installed?). Looked in:");
+    amaranDataDirs().forEach(d => console.log(`  ${d}`));
     console.log("Proceeding with manual setup.\n");
   }
 
@@ -128,7 +132,7 @@ async function main() {
   saveConfig(config);
 
   console.log(`\n✓ Saved to lights.json`);
-  console.log(`  Relay hub: ${config.lights.find(l => l.uuid === config!.relayHub)?.name ?? config.relayHub}`);
+  console.log(`  Relay hub: ${config.lights.find(l => l.mac.toUpperCase() === config!.relayHub.toUpperCase())?.name ?? config.relayHub}`);
   console.log(`  ${config.lights.length} light(s) configured`);
   console.log("\nTry it:  npm run mesh:on");
 

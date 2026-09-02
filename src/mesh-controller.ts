@@ -63,7 +63,7 @@ function aesCmac(key: Buffer, message: Buffer): Buffer {
   const n = Math.ceil(message.length / 16) || 1;
   const lastComplete = message.length > 0 && message.length % 16 === 0;
 
-  let x = Buffer.alloc(16, 0);
+  let x: Buffer = Buffer.alloc(16, 0);
 
   for (let i = 0; i < n - 1; i++) {
     const block = message.subarray(i * 16, i * 16 + 16);
